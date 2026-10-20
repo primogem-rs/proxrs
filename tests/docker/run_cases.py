@@ -81,7 +81,7 @@ def exclusion_matrix(fixture):
 
 
 def terminal_input(fixture):
-    for piped in (False, True):
+    for piped, queued in ((False, False), (True, False), (False, True)):
         args = run_args(fixture, ['interactive', str(fixture.path / 'ca.pem')])
         if not piped:
             args.remove('--password-stdin')
@@ -91,14 +91,15 @@ def terminal_input(fixture):
             try:
                 if not piped:
                     process.wait_text('SSH password:')
-                    process.send(fixture.password + '\n')
+                    process.send(fixture.password + '\n' + ('terminal-command-input\n' if queued else ''))
                 output = process.wait_text('CHILD_READY ')
                 child = json.loads(re.search(r'CHILD_READY (.+)', output)[1])
                 child_pid = child['pid']
                 assert child['tty'] and child['blocking'] and child['pid'] == child['pgid'] == child['foreground'], child
-                process.send('\x03')
-                process.wait_text('CHILD_HANDLED_INT_AND_HTTPS')
-                process.send('terminal-command-input\n')
+                if not queued:
+                    process.send('\x03')
+                    process.wait_text('CHILD_HANDLED_INT_AND_HTTPS')
+                    process.send('terminal-command-input\n')
                 process.wait_text('CHECK_RESTORED_INPUT')
                 process.send('next-foreground-command\n')
                 assert process.wait() == 7, process.read(0)

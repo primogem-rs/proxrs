@@ -24,9 +24,25 @@ secret-provider read ssh-password | cargo run -- up \
 
 The proxy forwards ordinary HTTP/1.1 requests and streams uploads and responses through SSH. HTTPS and secure WebSocket traffic use opaque CONNECT tunnels.
 
-After authentication and listener binding, proxrs prints six shell exports. Apply them in a second shell while proxrs remains running. Both HTTP/HTTPS variable variants use an `http://127.0.0.1:<port>` URL; HTTPS uses an opaque CONNECT tunnel with the application's own TLS verification. Proxy exclusions default to loopback only. These variables configure cooperating clients; exclusions and applications that ignore proxy variables can connect directly.
+After authentication and listener binding, `up` prints six shell exports. Apply them in a second shell while proxrs remains running. Both HTTP/HTTPS variable variants use an `http://127.0.0.1:<port>` URL; HTTPS uses an opaque CONNECT tunnel with the application's own TLS verification. Proxy exclusions default to loopback only. These variables configure cooperating clients; exclusions and applications that ignore proxy variables can connect directly.
 
-Ctrl-C or SIGTERM stops the foreground proxy and its tunnels. In this slice, SSH loss ends the session with a nonzero status. Managed commands and bounded recovery are tracked by the remaining [v0.1 tickets](https://github.com/primogem-rs/proxrs/issues/1); see [SPEC.md](SPEC.md).
+Ctrl-C or SIGTERM stops the foreground proxy and its tunnels. In this slice, SSH loss ends the session with a nonzero status. Bounded recovery is tracked by the remaining [v0.1 tickets](https://github.com/primogem-rs/proxrs/issues/1); see [SPEC.md](SPEC.md).
+
+## Managed commands
+
+Launch a foreground command with arguments after `--`:
+
+```sh
+cargo run -- run --host server.example --user alice -- curl https://example.com
+secret-provider read ssh-password | cargo run -- run \
+  --host server.example --user alice --password-stdin -- your-command --your-option
+```
+
+`run` waits for authentication and listener readiness, then launches the command directly with literal arguments. It sets upper/lowercase HTTP and HTTPS proxy variables to the actual loopback URL, removes `ALL_PROXY`/`all_proxy`, and replaces both exclusion variables with `localhost,127.0.0.1,::1`. Use `--inherit-no-proxy` before `--` to append these defaults to inherited exclusions. A set lowercase `no_proxy` wins over uppercase, even when empty; an inherited `*` is preserved exactly. Only the child's environment changes.
+
+Child stdout/stderr remain available, and `run` does not print export instructions. Hidden password entry preserves terminal input. With `--password-stdin`, the command receives a fresh blocking controlling-terminal descriptor when available, otherwise null input; it never receives the password pipe. The command owns terminal Ctrl-C, so a command that handles it and continues keeps its proxy. Proxrs restores the prior foreground process group and terminal settings on exit, including launch errors.
+
+Normal command completion closes the proxy, cleans remaining members of the command's process group, and returns the command's status. Directed SIGINT/SIGTERM and, until bounded recovery lands, SSH loss close the proxy and terminate the owned group. Cleanup allows five seconds before SIGKILL. Unrelated processes and already running services are never owned; deliberately detached daemons are outside this process-group guarantee. A signal-ended command returns `128 + signal`.
 
 ## Development
 
@@ -40,6 +56,8 @@ python3 tests/docker/proxy_cases.py --image ubuntu:24.04
 python3 tests/docker/proxy_cases.py --image debian:12
 python3 tests/docker/trust_cases.py --image ubuntu:24.04
 python3 tests/docker/trust_cases.py --image debian:12
+python3 tests/docker/run_cases.py --image ubuntu:24.04
+python3 tests/docker/run_cases.py --image debian:12
 python3 tests/docker/http_cases.py --image ubuntu:24.04
 python3 tests/docker/http_cases.py --image debian:12
 cargo build --release
