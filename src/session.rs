@@ -21,13 +21,16 @@ pub async fn up(options: ConnectionOptions) -> Result<()> {
 }
 
 async fn run(options: ConnectionOptions, cancel: CancellationToken) -> Result<()> {
-    terminal::require_stdin(options.password_stdin)?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, options.port))
         .await
         .context("could not bind local proxy on 127.0.0.1; choose a free --port")?;
     let port = listener.local_addr()?.port();
-    let password = terminal::password_from_stdin().await?;
-    let ssh = Arc::new(Connection::connect(&options, &password).await?);
+    let mut password = if options.password_stdin {
+        Some(terminal::password_from_stdin().await?)
+    } else {
+        None
+    };
+    let ssh = Arc::new(Connection::connect(&options, &mut password).await?);
     drop(password);
     terminal::exports(port)?;
     tokio::select! {

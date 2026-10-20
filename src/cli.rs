@@ -19,7 +19,7 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct ConnectionOptions {
-    #[arg(long, value_parser = parse_host)]
+    #[arg(long, value_parser = HostParser)]
     pub host: String,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     pub user: String,
@@ -43,6 +43,33 @@ impl ConnectionOptions {
             )
             .join(".ssh/known_hosts")),
         }
+    }
+}
+
+#[derive(Clone)]
+struct HostParser;
+
+impl clap::builder::TypedValueParser for HostParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        _argument: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        value
+            .to_str()
+            .and_then(|value| parse_host(value).ok())
+            .ok_or_else(|| {
+                // Function-based parsers make Clap include the rejected value.
+                // It may itself contain credentials, so report only the rule.
+                clap::Error::raw(
+                    clap::error::ErrorKind::ValueValidation,
+                    "invalid --host: host must be a DNS name or IP address without credentials or a port",
+                )
+                .with_cmd(command)
+            })
     }
 }
 
