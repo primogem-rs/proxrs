@@ -1,0 +1,71 @@
+use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    version,
+    about = "A loopback HTTP proxy through password-authenticated SSH"
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Keep a local proxy running; use the printed exports in a second shell.
+    Up(ConnectionOptions),
+}
+
+#[derive(Args)]
+pub struct ConnectionOptions {
+    #[arg(long, value_parser = parse_host)]
+    pub host: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub user: String,
+    #[arg(long, default_value_t = 22, value_parser = clap::value_parser!(u16).range(1..))]
+    pub ssh_port: u16,
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+    #[arg(long)]
+    pub password_stdin: bool,
+    #[arg(long)]
+    pub known_hosts: Option<PathBuf>,
+}
+
+impl ConnectionOptions {
+    pub fn known_hosts_path(&self) -> anyhow::Result<PathBuf> {
+        match &self.known_hosts {
+            Some(path) => Ok(path.clone()),
+            None => Ok(PathBuf::from(
+                std::env::var_os("HOME")
+                    .ok_or_else(|| anyhow::anyhow!("HOME is unset; provide --known-hosts"))?,
+            )
+            .join(".ssh/known_hosts")),
+        }
+    }
+}
+
+fn parse_host(value: &str) -> Result<String, String> {
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(value.to_owned());
+    }
+    let hostname = value.strip_suffix('.').unwrap_or(value);
+    if hostname.is_empty()
+        || hostname.len() > 253
+        || hostname.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return Err(
+            "host must be a DNS name or IP address without credentials or a port".to_owned(),
+        );
+    }
+    Ok(value.to_owned())
+}
