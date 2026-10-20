@@ -101,7 +101,9 @@ class Fixture:
             if not data:
                 break
             response += data
-        assert response.startswith(f"HTTP/1.1 {status} ".encode()), response
+        if not response.startswith(f"HTTP/1.1 {status} ".encode()):
+            stream.close()
+            raise AssertionError(response)
         return stream
 
     def https(self, authority="origin.proxrs.test:8443"):
