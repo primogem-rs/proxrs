@@ -1,4 +1,4 @@
-use crate::{cli::ConnectionOptions, trust};
+use crate::{cli::ConnectionOptions, terminal, trust};
 use anyhow::{Context, Result, bail};
 use russh::{Channel, ChannelMsg, client, keys::PublicKeyOrCertificate};
 use std::{
@@ -12,7 +12,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
     net::TcpStream,
-    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,11 @@ struct TrustHandler {
     host: String,
     port: u16,
     known_hosts: std::path::PathBuf,
+    approvals: mpsc::Sender<HostApproval>,
+}
+struct HostApproval {
+    key: ssh_key::PublicKey,
+    response: oneshot::Sender<()>,
 }
 impl client::Handler for TrustHandler {
     type Error = anyhow::Error;
@@ -42,7 +47,17 @@ impl client::Handler for TrustHandler {
         let PublicKeyOrCertificate::PublicKey { key, .. } = key else {
             bail!("SSH host certificates are unsupported");
         };
-        trust::verify(&self.known_hosts, &self.host, self.port, &key.to_bytes()?)?;
+        if !trust::verify(&self.known_hosts, &self.host, self.port, &key.to_bytes()?)? {
+            let (response, approved) = oneshot::channel();
+            self.approvals
+                .send(HostApproval {
+                    key: key.clone(),
+                    response,
+                })
+                .await
+                .context("host approval is unavailable")?;
+            approved.await.context("SSH host key was not approved")?;
+        }
         Ok(true)
     }
 }
@@ -106,9 +121,20 @@ impl Drop for Connection {
 }
 
 impl Connection {
-    pub async fn connect(options: &ConnectionOptions, password: &str) -> Result<Self> {
-        tokio::time::timeout(DEADLINE, async {
-            let stream = TcpStream::connect((options.host.as_str(), options.ssh_port)).await.context("could not connect to SSH server")?.into_std()?;
+    pub async fn connect(
+        options: &ConnectionOptions,
+        password: &mut Option<zeroize::Zeroizing<String>>,
+    ) -> Result<Self> {
+        let mut deadline = tokio::time::Instant::now() + DEADLINE;
+        let operation = async {
+            let stream = tokio::time::timeout_at(
+                deadline,
+                TcpStream::connect((options.host.as_str(), options.ssh_port)),
+            )
+            .await
+            .context("SSH startup deadline exceeded (10 seconds)")?
+            .context("could not connect to SSH server")?
+            .into_std()?;
             let socket = SocketGuard(stream.try_clone()?);
             let config = client::Config {
                 window_size: 64 * 1024,
@@ -121,19 +147,79 @@ impl Connection {
                 nodelay: true,
                 ..Default::default()
             };
-            let handler = TrustHandler { host: options.host.clone(), port: options.ssh_port, known_hosts: options.known_hosts_path()? };
-            let mut handle = client::connect_stream(Arc::new(config), TcpStream::from_std(stream)?, handler).await.context("SSH handshake or host verification failed")?;
-            if let russh::client::AuthResult::Failure { remaining_methods, .. } = handle.authenticate_none(&options.user).await.context("could not query SSH authentication methods")?
-                && !remaining_methods.contains(&russh::MethodKind::Password) {
-                bail!("SSH server requires unsupported authentication; password authentication must be enabled (keyboard-interactive/MFA is unsupported)");
+            let (approval_sender, mut approvals) = mpsc::channel::<HostApproval>(1);
+            let known_hosts = options.known_hosts_path()?;
+            let handler = TrustHandler {
+                host: options.host.clone(),
+                port: options.ssh_port,
+                known_hosts: known_hosts.clone(),
+                approvals: approval_sender,
+            };
+            let handshaking =
+                client::connect_stream(Arc::new(config), TcpStream::from_std(stream)?, handler);
+            tokio::pin!(handshaking);
+            let mut handle = loop {
+                tokio::select! {
+                    result = &mut handshaking => break result.map_err(explain_handshake_error).context("SSH handshake or host verification failed")?,
+                    Some(approval) = approvals.recv() => {
+                        // Input lives in this task, not the SSH driver's callback:
+                        // cancelling startup immediately drops the terminal guard.
+                        let started = tokio::time::Instant::now();
+                        terminal::approve_host(&options.host, options.ssh_port,
+                            approval.key.algorithm().as_str(),
+                            &approval.key.fingerprint(ssh_key::HashAlg::Sha256).to_string()).await?;
+                        deadline += started.elapsed();
+                        trust::save(&known_hosts, &options.host, options.ssh_port, &approval.key)?;
+                        let _ = approval.response.send(());
+                    }
+                    _ = tokio::time::sleep_until(deadline) => bail!("SSH startup deadline exceeded (10 seconds)"),
+                }
+            };
+            if let russh::client::AuthResult::Failure {
+                remaining_methods, ..
+            } = tokio::time::timeout_at(deadline, handle.authenticate_none(&options.user))
+                .await
+                .context("SSH startup deadline exceeded (10 seconds)")?
+                .context("could not query SSH authentication methods")?
+                && !remaining_methods.contains(&russh::MethodKind::Password)
+            {
+                bail!(
+                    "SSH server requires unsupported authentication; password authentication must be enabled (keyboard-interactive/MFA is unsupported)"
+                );
             }
-            match handle.authenticate_password(&options.user, password).await.context("SSH password authentication failed")? {
-                russh::client::AuthResult::Success => {},
-                russh::client::AuthResult::Failure { partial_success: true, .. } => bail!("SSH authentication requires an unsupported additional method"),
-                russh::client::AuthResult::Failure { .. } => bail!("SSH password authentication rejected"),
+            if password.is_none() {
+                let started = tokio::time::Instant::now();
+                *password = Some(terminal::password_from_terminal().await?);
+                deadline += started.elapsed();
             }
-            Ok(Self { handle: Arc::new(handle), capacity: Arc::new(Semaphore::new(CHANNELS)), cancel: CancellationToken::new(), _socket: socket })
-        }).await.context("SSH startup deadline exceeded (10 seconds)")?
+            match tokio::time::timeout_at(
+                deadline,
+                handle.authenticate_password(
+                    &options.user,
+                    password.as_ref().expect("password obtained").as_str(),
+                ),
+            )
+            .await
+            .context("SSH startup deadline exceeded (10 seconds)")?
+            .context("SSH password authentication failed")?
+            {
+                russh::client::AuthResult::Success => {}
+                russh::client::AuthResult::Failure {
+                    partial_success: true,
+                    ..
+                } => bail!("SSH authentication requires an unsupported additional method"),
+                russh::client::AuthResult::Failure { .. } => {
+                    bail!("SSH password authentication rejected")
+                }
+            }
+            Ok(Self {
+                handle: Arc::new(handle),
+                capacity: Arc::new(Semaphore::new(CHANNELS)),
+                cancel: CancellationToken::new(),
+                _socket: socket,
+            })
+        };
+        operation.await
     }
 
     pub fn is_closed(&self) -> bool {
@@ -234,4 +320,22 @@ async fn relay(
             }
         } => {},
     }
+}
+
+fn explain_handshake_error(error: anyhow::Error) -> anyhow::Error {
+    if let Some(russh::Error::NoCommonAlgo {
+        kind: russh::AlgorithmKind::Key,
+        theirs,
+        ..
+    }) = error.downcast_ref::<russh::Error>()
+        && !theirs.is_empty()
+        && theirs
+            .iter()
+            .all(|name| name.ends_with("-cert-v01@openssh.com"))
+    {
+        return anyhow::anyhow!(
+            "SSH host certificates are unsupported; the server must offer an ordinary host key"
+        );
+    }
+    error
 }

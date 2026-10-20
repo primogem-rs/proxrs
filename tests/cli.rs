@@ -14,20 +14,23 @@ fn up_requires_an_ssh_server_and_user() {
 }
 
 #[test]
-fn rejects_embedded_credentials_before_opening_a_connection() {
-    let output = Command::new(env!("CARGO_BIN_EXE_proxrs"))
-        .args([
-            "up",
-            "--host",
-            "alice:secret@example.com",
-            "--user",
-            "alice",
-            "--password-stdin",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("host"));
+fn rejects_embedded_credentials_without_exposing_them() {
+    for host_args in [
+        vec!["--host", "alice:synthetic-test-secret@example.com"],
+        vec!["--host=alice:synthetic-test-secret@example.com"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_proxrs"))
+            .arg("up")
+            .args(host_args)
+            .args(["--user", "alice", "--password-stdin"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("host"));
+        assert!(!error.contains("synthetic-test-secret"));
+    }
 }
 
 #[test]
