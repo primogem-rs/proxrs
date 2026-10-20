@@ -37,7 +37,7 @@ Each run builds the chosen distribution, creates its own container, password, ke
 
 The suite covers CONNECT/TLS, remote DNS, IPv6 destination authorities, 16 concurrent requests, half-close, malformed authorities, refused destinations, forwarding denial without SSH shutdown, host-key rejection, unsupported authentication, wrong passwords, RSA/SHA2 host keys, and a stalled PAM authentication response with the 10-second startup deadline. Passwords include leading/trailing spaces and arrive with CRLF to verify line-terminator-only removal. It also checks emitted exports, chosen ports, loopback binding with `lsof`, SIGINT/SIGTERM, established SSH-loss cleanup, slow-reader isolation, and a healthy destination progressing while another destination's connect is stalled and returns504.
 
-The existing `docker-ssh-smoke.sh` remains a separate fixture check; it does not establish Rust proxy correctness. Ordinary HTTP streaming, the release RSS workload, managed commands, and recovery/failure injection belong to later ticket suites. Do not infer those acceptance results from this CONNECT suite.
+The existing `docker-ssh-smoke.sh` remains a separate fixture check; it does not establish Rust proxy correctness. Ordinary HTTP streaming and the release RSS workload have a separate suite below. Managed commands and recovery/failure injection belong to later ticket suites. Do not infer those acceptance results from this CONNECT suite.
 
 ## Real proxrs terminal and trust cases
 
@@ -52,3 +52,16 @@ This suite imports the same isolated fixture and runs the macOS binary with a re
 The public CLI trust matrix covers OpenSSH-generated hashed hostnames, nondefault ports, wildcard and negative hostname patterns, whitespace, multiple key algorithms and record ordering, matching and unrelated revocations, changed keys, malformed/unreadable storage, persistence failure, and relevant versus unrelated certificate-authority records. A real SSH server restricted to a host-certificate algorithm must report the unsupported certificate requirement. A temporary PAM helper in the owned container counts authentication attempts without reading or recording credentials, proving trust rejection happens before password authentication. The fixture restores PAM and SSH configuration and removes its container and generated files on exit. It never changes the developer's SSH configuration.
 
 Host certificates and CA-based trust are explicitly unsupported. The suite validates ordinary host-key trust only; managed-child terminal ownership is a separate acceptance suite.
+
+## Real proxrs HTTP and load cases
+
+```sh
+cargo build
+python3 tests/docker/http_cases.py --image ubuntu:24.04
+python3 tests/docker/http_cases.py --image debian:12
+cargo build --release
+python3 tests/docker/load_cases.py --image ubuntu:24.04
+python3 tests/docker/load_cases.py --image debian:12
+```
+
+These suites use the same isolated fixture. They cover origin-form routing, Host and hop-header handling, reused client sockets across destinations, malformed framing and header deadlines, streamed request/response bodies, secure WebSocket traffic, cancellation, channel/client capacity, and healthy requests beside slow readers. The macOS release load runner compares lifetime peak RSS for 16 concurrent streams transferring 16 MiB and 1 GiB in aggregate. See [HTTP_ACCEPTANCE.md](HTTP_ACCEPTANCE.md) for the exact workload, measured results, buffer bounds, and verified acceptance cases. No private module tests or public origins are involved.
