@@ -99,7 +99,17 @@ fn termination_cancels_a_stalled_password_pipe() {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success());
+            if !status.success() {
+                use std::io::Read;
+                let mut stderr = String::new();
+                child
+                    .stderr
+                    .take()
+                    .unwrap()
+                    .read_to_string(&mut stderr)
+                    .unwrap();
+                panic!("termination failed with {status}: {stderr}");
+            }
             break;
         }
         if Instant::now() >= deadline {
@@ -109,4 +119,46 @@ fn termination_cancels_a_stalled_password_pipe() {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn run_requires_a_command_after_the_separator() {
+    for trailing in [vec![], vec!["printf", "must-not-run"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_proxrs"))
+            .args([
+                "run",
+                "--host",
+                "localhost",
+                "--user",
+                "alice",
+                "--password-stdin",
+            ])
+            .args(trailing)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn run_does_not_launch_a_command_when_the_listener_cannot_bind() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_proxrs"))
+        .args([
+            "run",
+            "--host",
+            "localhost",
+            "--user",
+            "alice",
+            "--password-stdin",
+            "--port",
+        ])
+        .arg(listener.local_addr().unwrap().port().to_string())
+        .args(["--", "/usr/bin/printf", "must-not-run"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not bind local proxy"));
 }

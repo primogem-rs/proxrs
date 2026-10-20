@@ -1,4 +1,5 @@
 mod cli;
+mod managed;
 mod proxy;
 mod session;
 mod terminal;
@@ -10,9 +11,13 @@ use clap::Parser;
 async fn main() {
     let result = match cli::Cli::parse().command {
         cli::Command::Up(options) => session::up(options).await,
+        cli::Command::Run(options) => session::managed(options).await,
     };
-    if let Err(error) = result {
-        eprintln!("proxrs: {error:#}");
-        std::process::exit(1);
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("proxrs: {error:#}");
+            std::process::exit(1);
+        }
     }
 }
