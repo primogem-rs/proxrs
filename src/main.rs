@@ -1,4 +1,5 @@
 mod cli;
+mod http_ingress;
 mod proxy;
 mod session;
 mod terminal;

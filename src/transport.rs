@@ -55,9 +55,15 @@ pub enum DestinationError {
     #[error("destination connection deadline exceeded")]
     Timeout,
     #[error(
-        "destination refused or SSH forwarding denied; check AllowTcpForwarding and PermitOpen"
+        "destination connection failed (refused or unreachable); check destination host and port"
     )]
     Refused,
+    #[error("SSH forwarding denied; check AllowTcpForwarding and PermitOpen")]
+    ForwardingDenied,
+    #[error(
+        "SSH server rejected the destination channel; check server channel support and resource limits"
+    )]
+    ChannelRejected,
 }
 
 pub struct DestinationStream {
@@ -175,7 +181,13 @@ impl Connection {
                     })
                 }
                 Err(_) if handle.is_closed() => Err(DestinationError::Unavailable),
-                Err(_) => Err(DestinationError::Refused),
+                Err(russh::Error::ChannelOpenFailure(
+                    russh::ChannelOpenFailure::AdministrativelyProhibited,
+                )) => Err(DestinationError::ForwardingDenied),
+                Err(russh::Error::ChannelOpenFailure(russh::ChannelOpenFailure::ConnectFailed)) => {
+                    Err(DestinationError::Refused)
+                }
+                Err(_) => Err(DestinationError::ChannelRejected),
             };
             let _ = sender.send(result);
         });

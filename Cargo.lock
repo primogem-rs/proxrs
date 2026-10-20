@@ -1319,6 +1319,7 @@ dependencies = [
  "bytes",
  "clap",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "russh",
