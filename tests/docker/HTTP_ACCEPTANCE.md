@@ -43,17 +43,17 @@ Each destination stream uses the existing 16 KiB duplex buffer, 64 KiB SSH recei
 
 ## Release RSS measurement
 
-Recorded on macOS 27.0.1, Darwin 27.0.0 arm64, Rust/Cargo 1.98.1. Each workload starts a fresh release-build proxrs process. Sixteen readers start together, and a second barrier waits for all sixteen response headers before any reader drains a body. Each reader requests one sixteenth of the aggregate payload, reads 16 KiB, and sleeps 1 ms after each read. Thus each stream transfers 1 MiB in the small run and 64 MiB in the large run. The origin generates fixed 16 KiB blocks rather than allocating a complete payload.
+Recorded after integrating #3 at `a5c5bdc`, on macOS 27.0.1, Darwin 27.0.0 arm64, Rust/Cargo 1.98.1. Each workload starts a fresh release-build proxrs process. Sixteen readers start together, and a second barrier waits for all sixteen response headers before any reader drains a body. Each reader requests one sixteenth of the aggregate payload, reads 16 KiB, and sleeps 1 ms after each read. Thus each stream transfers 1 MiB in the small run and 64 MiB in the large run. The origin generates fixed 16 KiB blocks rather than allocating a complete payload.
 
-An independent client makes ordinary HTTP requests throughout each transfer, with no more than 50 ms between completed probes. Every probe must finish within three seconds. `os.wait4` records each proxrs child's lifetime peak RSS in macOS bytes after clean termination; the runner does not subtract cumulative child-process maxima. The assertion compares the larger process's peak RSS with the smaller process's peak and requires a delta no greater than 67,108,864 bytes (64 MiB).
+An independent client makes ordinary HTTP requests throughout each transfer, pausing 50 ms between probes. Every probe must finish within three seconds. `os.wait4` records each proxrs child's lifetime peak RSS in macOS bytes after clean termination; the runner does not subtract cumulative child-process maxima. The assertion compares the larger process's peak RSS with the smaller process's peak and requires a delta no greater than 67,108,864 bytes (64 MiB).
 
 | SSH fixture | Aggregate bytes | Peak RSS bytes | Elapsed seconds | Healthy requests |
 | --- | ---: | ---: | ---: | ---: |
-| Ubuntu 24.04 | 16,777,216 | 12,124,160 | 1.208 | 20 |
-| Ubuntu 24.04 | 1,073,741,824 | 14,237,696 | 6.199 | 111 |
-| Debian 12 | 16,777,216 | 11,141,120 | 1.187 | 21 |
-| Debian 12 | 1,073,741,824 | 14,254,080 | 5.931 | 107 |
+| Ubuntu 24.04 | 16,777,216 | 12,648,448 | 1.348 | 23 |
+| Ubuntu 24.04 | 1,073,741,824 | 13,975,552 | 5.958 | 90 |
+| Debian 12 | 16,777,216 | 11,075,584 | 1.163 | 20 |
+| Debian 12 | 1,073,741,824 | 14,155,776 | 6.247 | 113 |
 
-Ubuntu's delta was 2,113,536 bytes (2.02 MiB); Debian's was 3,112,960 bytes (2.97 MiB). Both passed the 64 MiB acceptance threshold while healthy requests continued to complete. These are observed fixture measurements, not an estimate or a throughput promise.
+Ubuntu's delta was 1,327,104 bytes (1.27 MiB); Debian's was 3,080,192 bytes (2.94 MiB). Both passed the 64 MiB acceptance threshold while healthy requests continued to complete. These are observed fixture measurements, not an estimate or a throughput promise.
 
 Managed-command environment/PTY behavior and bounded SSH recovery are separate ticket suites. These HTTP results do not establish those remaining v0.1 acceptance criteria or application-specific compatibility.
