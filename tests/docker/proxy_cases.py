@@ -33,10 +33,12 @@ class Fixture:
     def __enter__(self):
         try:
             tag = "proxrs-test-" + self.image.replace(":", "-")
-            command("docker", "build", "--build-arg", "BASE_IMAGE=" + self.image,
+            image_id = self.path / "image-id"
+            command("docker", "build", "--iidfile", str(image_id), "--build-arg", "BASE_IMAGE=" + self.image,
                     "--tag", tag, str(ROOT / "tests/docker"))
+            built_image = image_id.read_text().strip()
             self.container = command("docker", "run", "--detach", "--rm", "--label", "dev.proxrs.fixture=cli",
-                                     "--publish", "127.0.0.1::22", "--add-host", "origin.proxrs.test:127.0.0.1", tag).decode().strip()
+                                     "--publish", "127.0.0.1::22", "--add-host", "origin.proxrs.test:127.0.0.1", built_image).decode().strip()
             self.port = int(command("docker", "port", self.container, "22/tcp").decode().strip().rsplit(":", 1)[1])
             self.docker("chpasswd", input=("proxrs:" + self.password + "\n").encode())
             for _ in range(100):

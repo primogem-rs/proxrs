@@ -37,4 +37,18 @@ Each run builds the chosen distribution, creates its own container, password, ke
 
 The suite covers CONNECT/TLS, remote DNS, IPv6 destination authorities, 16 concurrent requests, half-close, malformed authorities, refused destinations, forwarding denial without SSH shutdown, host-key rejection, unsupported authentication, wrong passwords, RSA/SHA2 host keys, and a stalled PAM authentication response with the 10-second startup deadline. Passwords include leading/trailing spaces and arrive with CRLF to verify line-terminator-only removal. It also checks emitted exports, chosen ports, loopback binding with `lsof`, SIGINT/SIGTERM, established SSH-loss cleanup, slow-reader isolation, and a healthy destination progressing while another destination's connect is stalled and returns504.
 
-The existing `docker-ssh-smoke.sh` remains a separate fixture check; it does not establish Rust proxy correctness. Complete interactive trust, ordinary HTTP streaming, the release RSS workload, managed-command/PTY behavior, and recovery/failure injection belong to later ticket suites. Do not infer those acceptance results from this CONNECT suite.
+The existing `docker-ssh-smoke.sh` remains a separate fixture check; it does not establish Rust proxy correctness. Ordinary HTTP streaming, the release RSS workload, managed commands, and recovery/failure injection belong to later ticket suites. Do not infer those acceptance results from this CONNECT suite.
+
+## Real proxrs terminal and trust cases
+
+```sh
+cargo build
+python3 tests/docker/trust_cases.py --image ubuntu:24.04
+python3 tests/docker/trust_cases.py --image debian:12
+```
+
+This suite imports the same isolated fixture and runs the macOS binary with a real controlling pseudo-terminal. It checks hidden password entry (including whitespace), exact terminal-state restoration on success/error/cancellation, Ctrl-C and SIGTERM while either prompt is waiting without a newline, first-key fingerprint display, explicit/blank/declined approval, saved-key reuse, and HTTPS after enrollment. Password piping and terminal approval use separate descriptors. A real waiting shell proves cancellation discards a partially typed password, while successful input preserves the following terminal line. Human delays longer than ten seconds at each prompt must still succeed. Newly created trust files and directories have private permissions; existing records and comments remain intact.
+
+The public CLI trust matrix covers OpenSSH-generated hashed hostnames, nondefault ports, wildcard and negative hostname patterns, whitespace, multiple key algorithms and record ordering, matching and unrelated revocations, changed keys, malformed/unreadable storage, persistence failure, and relevant versus unrelated certificate-authority records. A real SSH server restricted to a host-certificate algorithm must report the unsupported certificate requirement. A temporary PAM helper in the owned container counts authentication attempts without reading or recording credentials, proving trust rejection happens before password authentication. The fixture restores PAM and SSH configuration and removes its container and generated files on exit. It never changes the developer's SSH configuration.
+
+Host certificates and CA-based trust are explicitly unsupported. The suite validates ordinary host-key trust only; managed-child terminal ownership is a separate acceptance suite.
