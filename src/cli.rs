@@ -15,6 +15,18 @@ pub struct Cli {
 pub enum Command {
     /// Keep a local proxy running; use the printed exports in a second shell.
     Up(ConnectionOptions),
+    /// Run a foreground command with the proxy environment and own its lifetime.
+    Run(RunOptions),
+}
+
+#[derive(Args)]
+pub struct RunOptions {
+    #[command(flatten)]
+    pub connection: ConnectionOptions,
+    #[arg(long)]
+    pub inherit_no_proxy: bool,
+    #[arg(last = true, required = true, num_args = 1..)]
+    pub command: Vec<std::ffi::OsString>,
 }
 
 #[derive(Args)]

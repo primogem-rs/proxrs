@@ -65,3 +65,17 @@ python3 tests/docker/load_cases.py --image debian:12
 ```
 
 These suites use the same isolated fixture. They cover origin-form routing, Host and hop-header handling, reused client sockets across destinations, malformed framing and header deadlines, streamed request/response bodies, secure WebSocket traffic, cancellation, channel/client capacity, and healthy requests beside slow readers. The macOS release load runner compares lifetime peak RSS for 16 concurrent streams transferring 16 MiB and 1 GiB in aggregate. See [HTTP_ACCEPTANCE.md](HTTP_ACCEPTANCE.md) for the exact workload, measured results, buffer bounds, and verified acceptance cases. No private module tests or public origins are involved.
+
+## Real proxrs managed-command cases
+
+```sh
+cargo build
+python3 tests/docker/run_cases.py --image ubuntu:24.04
+python3 tests/docker/run_cases.py --image debian:12
+```
+
+The suite launches a controlled Python foreground command through the actual Rust binary. It verifies literal arguments, validated HTTPS through the unpublished origin, the complete proxy-exclusion precedence matrix, all four proxy variables, ALL_PROXY removal, headless null stdin despite leftover password-pipe bytes, nonzero exit propagation, and listener shutdown. Invalid authentication and occupied ports prevent launch.
+
+Real macOS pseudo-terminals cover fresh blocking input after hidden and piped passwords, queued command input after the password, foreground ownership before the child's first read, Ctrl-C handled by a continuing command followed by HTTPS, and launch failure/startup cancellation/directed termination. An existing foreground helper verifies hand-back of its process group, exact terminal settings, and its next input line after the child changes canonical/echo settings. Darwin's transient PENDIN queue flag is allowed only until that next input operation; the final settings comparison is exact.
+
+Cooperative and SIGTERM-ignoring commands/descendants exercise normal completion, directed SIGINT/SIGTERM, and real SSH loss. Tests verify the listener closes during the five-second grace, owned processes disappear, and an unrelated sentinel survives. Each test owns fresh processes and removes them in finally blocks; deliberately detached daemons are outside the product guarantee and are not created by this suite. These are proxrs acceptance checks, separate from the OpenSSH-only smoke script. SSH-loss behavior will be extended by the bounded-recovery slice.
