@@ -1,6 +1,6 @@
 # proxrs
 
-A planned Rust CLI that turns SSH access into a local HTTP proxy for Codex, pi, and other applications using proxy environment variables.
+A planned Rust CLI that turns SSH access into a local HTTP proxy for applications using proxy environment variables. Codex and pi are example consumers; proxrs provides generic HTTP forwarding and HTTPS CONNECT.
 
 The initial design supports a macOS client, password authentication to Ubuntu/Debian SSH servers, foreground use, managed application launching, and bounded reconnection. It needs SSH TCP forwarding and does not install software on the server.
 

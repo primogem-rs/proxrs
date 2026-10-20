@@ -25,3 +25,17 @@ proxrs is a Rust CLI that exposes a local HTTP proxy through an authenticated SS
 - The initial fixture check is `bash scripts/docker-ssh-smoke.sh`. Extend the harness to invoke the Rust CLI when it exists; fixture checks alone do not establish proxy correctness.
 - Generate fixture credentials per run, use an isolated known-hosts file, and remove owned containers and temporary credentials on exit. Never reuse unrelated containers or change the developer's SSH configuration.
 - Report separately what passed against the fixture, what passed against proxrs, and which acceptance cases remain unverified.
+
+## Agent skills
+
+### Issue tracker
+
+Work is tracked in GitHub Issues for `primogem-rs/proxrs`. Read `docs/agents/issue-tracker.md` before issue-tracker operations.
+
+### Triage labels
+
+Use the five default triage labels. Read `docs/agents/triage-labels.md` before assigning triage states.
+
+### Domain docs
+
+Use a single-context layout: root `GLOSSARY.md` and `docs/adr/`. Read `docs/agents/domain.md` before exploring domain concepts or architectural decisions.

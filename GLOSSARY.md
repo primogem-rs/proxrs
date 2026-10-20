@@ -12,6 +12,10 @@ _Avoid_: Proxy server (when referring to the SSH server), node
 The endpoint on the user's computer through which applications send proxied requests.
 _Avoid_: Remote proxy, VPN
 
+**Proxy exclusion**:
+A destination rule that tells an application to connect directly instead of using the local proxy.
+_Avoid_: Exception (without specifying what is bypassed)
+
 **Destination**:
 The service an application wants to reach through the local proxy and SSH server.
 _Avoid_: Target (which can be confused with the SSH server)
@@ -21,5 +25,5 @@ One invocation's lifetime, from connecting to the SSH server through shutdown, i
 _Avoid_: Deployment, installation
 
 **Managed command**:
-An application launched by proxrs whose proxy settings and lifetime are managed by that proxy session.
+The foreground application launched by proxrs whose proxy settings and lifetime belong to that proxy session. Independently running services are outside this ownership.
 _Avoid_: Agent (applications other than coding agents are supported)
