@@ -1,0 +1,25 @@
+# proxrs
+
+Language for creating and using a proxy connection through a remote SSH server.
+
+## Language
+
+**SSH server**:
+The remote host that authenticates the user and connects to destinations on the user's behalf.
+_Avoid_: Proxy server (when referring to the SSH server), node
+
+**Local proxy**:
+The endpoint on the user's computer through which applications send proxied requests.
+_Avoid_: Remote proxy, VPN
+
+**Destination**:
+The service an application wants to reach through the local proxy and SSH server.
+_Avoid_: Target (which can be confused with the SSH server)
+
+**Proxy session**:
+One invocation's lifetime, from connecting to the SSH server through shutdown, including any reconnection attempts.
+_Avoid_: Deployment, installation
+
+**Managed command**:
+An application launched by proxrs whose proxy settings and lifetime are managed by that proxy session.
+_Avoid_: Agent (applications other than coding agents are supported)
