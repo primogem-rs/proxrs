@@ -6,7 +6,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash proxrs \
     && mkdir -p /run/sshd /srv/proxrs-test \
-    && printf 'proxrs-orbstack-origin\n' > /srv/proxrs-test/index.html \
+    && printf 'proxrs-docker-origin\n' > /srv/proxrs-test/index.html \
     && rm -f /etc/ssh/ssh_host_*
 
 COPY sshd_config /etc/ssh/sshd_config

@@ -6,7 +6,7 @@ proxrs is a Rust CLI that exposes a local HTTP proxy through an authenticated SS
 
 - Read [SPEC.md](SPEC.md) before changing CLI behavior, SSH authentication, proxy handling, reconnection, or process lifecycle. It owns the product contract and acceptance criteria.
 - Read [GLOSSARY.md](GLOSSARY.md) when naming domain concepts or changing their meaning; update it when a term is settled.
-- Read [tests/orbstack/README.md](tests/orbstack/README.md) before running or extending the SSH integration fixture.
+- Read [tests/docker/README.md](tests/docker/README.md) before running or extending the SSH integration fixture.
 
 ## Implementation
 
@@ -21,7 +21,7 @@ proxrs is a Rust CLI that exposes a local HTTP proxy through an authenticated SS
 
 - For Rust changes, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - Keep default Rust tests deterministic and independent of Docker, credentials, and public internet services.
-- For changes to SSH, forwarding, or lifecycle behavior, run the relevant integration cases against a disposable container in OrbStack. Exercise real SSH from macOS; a mocked transport alone is insufficient.
-- The initial fixture check is `bash scripts/orbstack-ssh-smoke.sh`. Extend the harness to invoke the Rust CLI when it exists; fixture checks alone do not establish proxy correctness.
+- For changes to SSH, forwarding, or lifecycle behavior, run the relevant integration cases against a disposable Docker container. Exercise real SSH from macOS; a mocked transport alone is insufficient.
+- The initial fixture check is `bash scripts/docker-ssh-smoke.sh`. Extend the harness to invoke the Rust CLI when it exists; fixture checks alone do not establish proxy correctness.
 - Generate fixture credentials per run, use an isolated known-hosts file, and remove owned containers and temporary credentials on exit. Never reuse unrelated containers or change the developer's SSH configuration.
 - Report separately what passed against the fixture, what passed against proxrs, and which acceptance cases remain unverified.

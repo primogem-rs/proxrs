@@ -14,7 +14,7 @@ Given SSH connection details, proxrs exposes a local HTTP proxy so applications 
 - Username/password authentication first. Hidden interactive entry and `--password-stdin`; credentials are not saved or passed as command arguments.
 - Both a standalone foreground proxy and `proxrs run -- <command>`.
 - Retry SSH disconnections a few times, then exit on failure.
-- Integration validation from macOS against a real SSH server in an OrbStack container.
+- Integration validation from macOS against a real SSH server in a Docker container, independent of the local Docker runtime provider.
 
 The remaining numeric defaults below are initial design choices, adjustable through implementation experience.
 
@@ -144,11 +144,11 @@ The release is ready only when these pass against the actual Rust binary:
 8. Teardown leaves no listener, child process, test container, or credential file behind. Logs never contain passwords, authorization headers, or request bodies.
 9. Manual smoke checks with the user's installed Codex and pi verify a real request and streaming behavior. Record the client versions and any application-specific configuration; do not infer support from curl alone.
 
-Use deterministic container-local origins for the core suite, with no production credentials or billable API calls. The initial OrbStack harness validates password SSH and direct forwarding only; see [fixture instructions](tests/orbstack/README.md). Application checks are a later, separate acceptance step.
+Use deterministic container-local origins for the core suite, with no production credentials or billable API calls. Test the real CLI and local HTTP endpoint, observing standard streams, environment output, exit status, and managed-command behavior rather than private module internals. The initial Docker harness validates password SSH and direct forwarding only; see [fixture instructions](tests/docker/README.md). Application checks are a later, separate acceptance step.
 
 ## Implementation sequence
 
-1. Authenticate with password, verify host keys, and relay one HTTPS CONNECT request over a real SSH channel in OrbStack.
+1. Authenticate with password, verify host keys, and relay one HTTPS CONNECT request over a real SSH channel in Docker.
 2. Add HTTP forwarding, streamed bodies, limits, environment output, and `up` lifecycle handling.
 3. Add `run`, child environment/terminal handling, exit propagation, and cleanup.
 4. Add bounded reconnect supervision and failure injection; complete the acceptance matrix on Ubuntu and Debian and smoke-test the intended applications.

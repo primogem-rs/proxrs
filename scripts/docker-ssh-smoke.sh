@@ -10,7 +10,7 @@ for dependency in docker ssh openssl; do
     }
 done
 
-docker_cmd=(docker --context orbstack)
+docker_cmd=(docker)
 "${docker_cmd[@]}" info >/dev/null
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/proxrs-ssh.XXXXXX")"
 container_id=""
@@ -34,7 +34,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-"${docker_cmd[@]}" build --tag proxrs-ssh-test:ubuntu24.04 "$repo_root/tests/orbstack"
+"${docker_cmd[@]}" build --tag proxrs-ssh-test:ubuntu24.04 "$repo_root/tests/docker"
 container_id="$("${docker_cmd[@]}" run --detach --rm \
     --label dev.proxrs.fixture=ssh \
     --publish 127.0.0.1::22 proxrs-ssh-test:ubuntu24.04)"
@@ -84,12 +84,12 @@ ssh_cmd=(ssh -F /dev/null -T -p "$ssh_port"
 
 remote_user="$("${ssh_cmd[@]}" proxrs@127.0.0.1 id -un </dev/null)"
 [[ "$remote_user" == proxrs ]]
-echo "PASS: password SSH login to the OrbStack container."
+echo "PASS: password SSH login to the Docker container."
 
 # The origin is container-loopback-only and has no published Docker port.
 printf 'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n' \
     | "${ssh_cmd[@]}" -W 127.0.0.1:8080 proxrs@127.0.0.1 > "$test_dir/response"
-if ! grep -q 'proxrs-orbstack-origin' "$test_dir/response"; then
+if ! grep -q 'proxrs-docker-origin' "$test_dir/response"; then
     echo "Did not receive the test origin through SSH forwarding." >&2
     exit 1
 fi

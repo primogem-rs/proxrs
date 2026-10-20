@@ -6,7 +6,7 @@ The initial design supports a macOS client, password authentication to Ubuntu/De
 
 ## Project status
 
-The project currently contains the Cargo starter, [v0.1 specification](SPEC.md), [agent guidance](AGENTS.md), and a working OrbStack SSH test fixture. The Rust executable still prints `Hello, world!`; proxy commands are not implemented.
+The project currently contains the Cargo starter, [v0.1 specification](SPEC.md), [agent guidance](AGENTS.md), and a working Docker SSH test fixture. The Rust executable still prints `Hello, world!`; proxy commands are not implemented.
 
 ## Development
 
@@ -14,7 +14,7 @@ The project currently contains the Cargo starter, [v0.1 specification](SPEC.md),
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-bash scripts/orbstack-ssh-smoke.sh
+bash scripts/docker-ssh-smoke.sh
 ```
 
-The last command builds a disposable Ubuntu SSH container in OrbStack, verifies password login and forwarding, then removes it and its temporary credentials. It tests the environment, not the future Rust implementation. See [fixture details](tests/orbstack/README.md).
+The last command builds a disposable Ubuntu SSH container using the active Docker configuration, verifies password login and forwarding, then removes it and its temporary credentials. It tests the environment, not the future Rust implementation. See [fixture details](tests/docker/README.md).
