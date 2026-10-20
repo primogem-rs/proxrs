@@ -106,4 +106,4 @@ if ! grep -q 'Permission denied' "$test_dir/auth-error"; then
     exit 1
 fi
 echo "PASS: incorrect SSH password rejected."
-echo "Fixture checks passed; the Rust proxy is not implemented yet."
+echo "Fixture checks passed; run tests/docker/proxy_cases.py separately to validate proxrs."

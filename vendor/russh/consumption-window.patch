@@ -1,0 +1,773 @@
+--- a/src/channels/channel_ref.rs
++++ b/src/channels/channel_ref.rs
+@@ -1,6 +1,11 @@
+-use tokio::sync::mpsc::Sender;
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
+ 
+-use super::WindowSizeRef;
++use std::sync::Arc;
++use std::sync::atomic::Ordering;
++use tokio::sync::mpsc::{Sender, error::SendError};
++
++use super::{WindowSizeRef, ReceiveCredit};
+ use crate::ChannelMsg;
+ 
+ /// A handle to the [`super::Channel`]'s to be able to transmit messages
+@@ -9,6 +14,7 @@
+ pub struct ChannelRef {
+     pub(super) sender: Sender<ChannelMsg>,
+     pub(super) window_size: WindowSizeRef,
++    pub(crate) receive_credit: Option<Arc<ReceiveCredit>>,
+ }
+ 
+ impl ChannelRef {
+@@ -16,7 +22,36 @@
+         Self {
+             sender,
+             window_size: WindowSizeRef::new(0),
++            receive_credit: None,
+         }
++    }
++
++    pub(crate) async fn send(&self, message: ChannelMsg) -> Result<(), SendError<ChannelMsg>> {
++        let Some(credit) = &self.receive_credit else {
++            return self.sender.send(message).await;
++        };
++        let lifecycle_bit = match &message {
++            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
++                // Empty packets consume no SSH window and must consume no queue slot.
++                if data.is_empty() { return Ok(()); }
++                0
++            }
++            ChannelMsg::Open { .. } | ChannelMsg::OpenFailure(_) => 1,
++            ChannelMsg::Eof => 2,
++            ChannelMsg::Close => 4,
++            // direct-tcpip is a byte stream. Window updates already reach the
++            // write half separately; session-channel notifications do not apply.
++            _ => return Ok(()),
++        };
++        if lifecycle_bit != 0
++            && credit.control_seen.fetch_or(lifecycle_bit, Ordering::AcqRel) & lifecycle_bit != 0
++        {
++            return Ok(());
++        }
++        // Capacity is window bytes + four lifecycle slots. Every queued data
++        // message costs >=1 byte of credit; no healthy peer can fill this queue.
++        // Fail closed if the invariant is broken, never block the shared reader.
++        self.sender.try_send(message).map_err(|error| SendError(error.into_inner()))
+     }
+ 
+     pub(crate) fn window_size(&self) -> &WindowSizeRef {
+@@ -31,3 +66,78 @@
+         &self.sender
+     }
+ }
++
++#[cfg(test)]
++mod backpressure_tests {
++    use super::*;
++    use bytes::Bytes;
++    use tokio::io::AsyncReadExt;
++    use tokio::sync::{Notify, mpsc};
++    use crate::channels::ChannelReadHalf;
++
++    fn pair(window: usize) -> (ChannelRef, ChannelReadHalf, Arc<ReceiveCredit>) {
++        let (sender, receiver) = mpsc::channel(window + 4);
++        let credit = ReceiveCredit::new(Arc::new(Notify::new()));
++        let mut reference = ChannelRef::new(sender);
++        reference.receive_credit = Some(credit.clone());
++        (reference, ChannelReadHalf { receiver, receive_credit: Some(credit.clone()) }, credit)
++    }
++
++    #[tokio::test]
++    async fn byte_sized_packets_and_controls_cannot_block_shared_delivery() {
++        let (reference, mut receiver, credit) = pair(8);
++        for _ in 0..1000 {
++            reference.send(ChannelMsg::Data { data: Bytes::new() }).await.unwrap();
++            reference.send(ChannelMsg::WindowAdjusted { new_size: 10 }).await.unwrap();
++        }
++        for byte in 0..8 {
++            reference.send(ChannelMsg::Data { data: Bytes::from(vec![byte]) }).await.unwrap();
++        }
++        for _ in 0..1000 {
++            reference.send(ChannelMsg::Eof).await.unwrap();
++            reference.send(ChannelMsg::Close).await.unwrap();
++        }
++        assert_eq!(credit.consumed.load(Ordering::Acquire), 0);
++        assert_eq!(receiver.receiver.len(), 10);
++        for _ in 0..8 { assert!(matches!(receiver.wait().await, Some(ChannelMsg::Data { .. }))); }
++        assert_eq!(credit.consumed.load(Ordering::Acquire), 8);
++        assert!(matches!(receiver.wait().await, Some(ChannelMsg::Eof)));
++        assert!(matches!(receiver.wait().await, Some(ChannelMsg::Close)));
++    }
++
++    #[tokio::test]
++    async fn partial_stream_reads_and_dropped_reader_return_exact_credit() {
++        let (reference, mut receiver, credit) = pair(8);
++        reference.send(ChannelMsg::Data { data: Bytes::from_static(b"12345678") }).await.unwrap();
++        let mut reader = receiver.make_reader();
++        let mut output = [0; 3];
++        reader.read_exact(&mut output).await.unwrap();
++        assert_eq!(&output, b"123");
++        assert_eq!(credit.consumed.load(Ordering::Acquire), 3);
++        drop(reader);
++        assert_eq!(credit.consumed.load(Ordering::Acquire), 8);
++        // A zero-window channel is woken by consumed bytes, even with no network input.
++        tokio::time::timeout(std::time::Duration::from_millis(100), credit.notify.notified()).await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn extended_data_and_ignored_stream_credit_share_the_window() {
++        let (reference, mut receiver, credit) = pair(8);
++        reference.send(ChannelMsg::ExtendedData { data: Bytes::from_static(b"err"), ext: 1 }).await.unwrap();
++        reference.send(ChannelMsg::Data { data: Bytes::from_static(b"ok") }).await.unwrap();
++        let mut reader = receiver.make_reader();
++        let mut output = [0; 2];
++        reader.read_exact(&mut output).await.unwrap();
++        assert_eq!(&output, b"ok");
++        assert_eq!(credit.consumed.load(Ordering::Acquire), 5);
++    }
++
++    #[tokio::test]
++    async fn invariant_breach_fails_immediately_instead_of_waiting() {
++        let (reference, _receiver, _credit) = pair(1);
++        for _ in 0..5 {
++            reference.send(ChannelMsg::Data { data: Bytes::from_static(b"x") }).await.unwrap();
++        }
++        assert!(reference.send(ChannelMsg::Data { data: Bytes::from_static(b"x") }).await.is_err());
++    }
++}
+--- a/src/channels/io/rx.rs
++++ b/src/channels/io/rx.rs
+@@ -1,11 +1,16 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ use std::borrow::BorrowMut;
+ use std::io;
+ use std::pin::Pin;
++use std::sync::Arc;
+ use std::task::{ready, Context, Poll};
+ 
+ use tokio::io::AsyncRead;
+ 
+ use super::{ChannelMsg, ChannelReadHalf};
++use crate::channels::ReceiveCredit;
+ 
+ #[derive(Debug)]
+ pub struct ChannelRx<R> {
+@@ -13,14 +18,17 @@
+     buffer: Option<(ChannelMsg, usize)>,
+ 
+     ext: Option<u32>,
++    credit: Option<Arc<ReceiveCredit>>,
+ }
+ 
+-impl<R> ChannelRx<R> {
+-    pub fn new(channel: R, ext: Option<u32>) -> Self {
++impl<R: BorrowMut<ChannelReadHalf>> ChannelRx<R> {
++    pub fn new(mut channel: R, ext: Option<u32>) -> Self {
++        let credit = channel.borrow_mut().receive_credit.clone();
+         Self {
+             channel,
+             buffer: None,
+             ext,
++            credit,
+         }
+     }
+ }
+@@ -34,6 +42,7 @@
+         cx: &mut Context<'_>,
+         buf: &mut tokio::io::ReadBuf<'_>,
+     ) -> Poll<io::Result<()>> {
++        if buf.remaining() == 0 { return Poll::Ready(Ok(())); }
+         let (msg, mut idx) = match self.buffer.take() {
+             Some(msg) => msg,
+             None => match ready!(self.channel.borrow_mut().receiver.poll_recv(cx)) {
+@@ -50,6 +59,7 @@
+                 #[allow(clippy::indexing_slicing)]
+                 buf.put_slice(&data[idx..idx + readable]);
+                 idx += readable;
++                if let Some(credit) = &self.credit { credit.release(readable); }
+ 
+                 if idx != data.len() {
+                     self.buffer = Some((msg, idx));
+@@ -64,6 +74,7 @@
+                 #[allow(clippy::indexing_slicing)]
+                 buf.put_slice(&data[idx..idx + readable]);
+                 idx += readable;
++                if let Some(credit) = &self.credit { credit.release(readable); }
+ 
+                 if idx != data.len() {
+                     self.buffer = Some((msg, idx));
+@@ -77,9 +88,27 @@
+                 Poll::Ready(Ok(()))
+             }
+             _ => {
++                if let Some(credit) = &self.credit {
++                    match &msg {
++                        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } =>
++                            credit.release(data.len() - idx),
++                        _ => (),
++                    }
++                }
+                 cx.waker().wake_by_ref();
+                 Poll::Pending
+             }
+         }
+     }
+ }
++
++impl<R> Drop for ChannelRx<R> {
++    fn drop(&mut self) {
++        if let (
++            Some(credit),
++            Some((ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }, offset)),
++        ) = (&self.credit, &self.buffer) {
++            credit.release(data.len() - offset);
++        }
++    }
++}
+--- a/src/channels/mod.rs
++++ b/src/channels/mod.rs
+@@ -1,4 +1,8 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ use std::sync::Arc;
++use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+ 
+ use bytes::Bytes;
+ use tokio::io::{AsyncRead, AsyncWrite};
+@@ -138,11 +142,39 @@
+     }
+ }
+ 
++/// Consumption credit for an opt-in direct-tcpip receive window.
++/// Notifications coalesce; the counter cannot exceed the advertised window.
++#[derive(Debug)]
++pub(crate) struct ReceiveCredit {
++    pub(crate) consumed: AtomicU32,
++    pub(crate) control_seen: AtomicU8,
++    pub(crate) notify: Arc<Notify>,
++}
++
++impl ReceiveCredit {
++    pub(crate) fn new(notify: Arc<Notify>) -> Arc<Self> {
++        Arc::new(Self {
++            consumed: AtomicU32::new(0),
++            control_seen: AtomicU8::new(0),
++            notify,
++        })
++    }
++
++    pub(crate) fn release(&self, bytes: usize) {
++        if bytes != 0 {
++            // Bytes originated in a u32 SSH receive window.
++            self.consumed.fetch_add(bytes as u32, Ordering::AcqRel);
++            self.notify.notify_one();
++        }
++    }
++}
++
+ /// A handle to the reading part of a session channel.
+ ///
+ /// Allows you to read from a channel without borrowing the session
+ pub struct ChannelReadHalf {
+     pub(crate) receiver: Receiver<ChannelMsg>,
++    pub(crate) receive_credit: Option<Arc<ReceiveCredit>>,
+ }
+ 
+ impl std::fmt::Debug for ChannelReadHalf {
+@@ -154,7 +186,15 @@
+ impl ChannelReadHalf {
+     /// Awaits an incoming [`ChannelMsg`], this method returns [`None`] if the channel has been closed.
+     pub async fn wait(&mut self) -> Option<ChannelMsg> {
+-        self.receiver.recv().await
++        let message = self.receiver.recv().await;
++        if let Some(credit) = &self.receive_credit {
++            match &message {
++                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) =>
++                    credit.release(data.len()),
++                _ => (),
++            }
++        }
++        message
+     }
+ 
+     /// Make a reader for the [`Channel`] to receive [`ChannelMsg::Data`]
+@@ -468,7 +508,7 @@
+     ) -> (Self, ChannelRef) {
+         let (tx, rx) = tokio::sync::mpsc::channel(channel_buffer_size);
+         let window_size = WindowSizeRef::new(window_size);
+-        let read_half = ChannelReadHalf { receiver: rx };
++        let read_half = ChannelReadHalf { receiver: rx, receive_credit: None };
+         let write_half = ChannelWriteHalf {
+             id,
+             sender,
+@@ -484,6 +524,7 @@
+             ChannelRef {
+                 sender: tx,
+                 window_size,
++                receive_credit: None,
+             },
+         )
+     }
+--- a/src/client/encrypted.rs
++++ b/src/client/encrypted.rs
+@@ -1,3 +1,6 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ // Copyright 2016 Pierre-Étienne Meunier
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+@@ -480,14 +483,16 @@
+                 };
+ 
+                 if let Some(channel) = self.channels.get(&local_id) {
+-                    channel
++                    if channel
+                         .send(ChannelMsg::Open {
+                             id: local_id,
+                             max_packet_size: msg.maximum_packet_size,
+                             window_size: msg.initial_window_size,
+                         })
+-                        .await
+-                        .unwrap_or(());
++                        .await.is_err() && channel.receive_credit.is_some() {
++                        // A canceled open must close its late-confirmed remote channel.
++                        self.close(local_id)?;
++                    }
+                 } else {
+                     error!("no channel for id {local_id:?}");
+                 }
+@@ -560,7 +565,8 @@
+                         .await;
+                 }
+ 
+-                let _ = self.sender.send(Reply::ChannelOpenFailure);
++                // Failure is delivered to the per-channel waiter above. No
++                // consumer reads this event from the authentication reply queue.
+ 
+                 client
+                     .channel_open_failure(channel_num, reason_code, &descr, &language, self)
+@@ -575,9 +581,13 @@
+                     return Ok(());
+                 }
+                 let target = self.common.config.window_size;
++                let consumption_driven = self.channels.get(&channel_num)
++                    .is_some_and(|channel| channel.receive_credit.is_some());
+                 #[allow(clippy::collapsible_if)]
+                 if let Some(ref mut enc) = self.common.encrypted {
+-                    if enc.adjust_window_size(channel_num, &data, target)? {
++                    if consumption_driven {
++                        enc.consume_receive_window(channel_num, data.len())?;
++                    } else if enc.adjust_window_size(channel_num, &data, target)? {
+                         let next_window =
+                             client.adjust_window(channel_num, self.target_window_size);
+                         if next_window > 0 {
+@@ -586,8 +596,11 @@
+                     }
+                 }
+ 
+-                if let Some(chan) = self.channels.get(&channel_num) {
+-                    let _ = chan.send(ChannelMsg::Data { data: data.clone() }).await;
++                if let Some(chan) = self.channels.get(&channel_num)
++                    && chan.send(ChannelMsg::Data { data: data.clone() }).await.is_err()
++                    && consumption_driven
++                {
++                    self.close(channel_num)?;
+                 }
+ 
+                 client.data(channel_num, &data, self).await
+@@ -602,9 +615,13 @@
+                     return Ok(());
+                 }
+                 let target = self.common.config.window_size;
++                let consumption_driven = self.channels.get(&channel_num)
++                    .is_some_and(|channel| channel.receive_credit.is_some());
+                 #[allow(clippy::collapsible_if)]
+                 if let Some(ref mut enc) = self.common.encrypted {
+-                    if enc.adjust_window_size(channel_num, &data, target)? {
++                    if consumption_driven {
++                        enc.consume_receive_window(channel_num, data.len())?;
++                    } else if enc.adjust_window_size(channel_num, &data, target)? {
+                         let next_window =
+                             client.adjust_window(channel_num, self.target_window_size);
+                         if next_window > 0 {
+@@ -613,13 +630,14 @@
+                     }
+                 }
+ 
+-                if let Some(chan) = self.channels.get(&channel_num) {
+-                    let _ = chan
+-                        .send(ChannelMsg::ExtendedData {
+-                            ext: extended_code,
+-                            data: data.clone(),
+-                        })
+-                        .await;
++                if let Some(chan) = self.channels.get(&channel_num)
++                    && chan.send(ChannelMsg::ExtendedData {
++                        ext: extended_code,
++                        data: data.clone(),
++                    }).await.is_err()
++                    && consumption_driven
++                {
++                    self.close(channel_num)?;
+                 }
+ 
+                 client
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -1,3 +1,6 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ // Copyright 2016 Pierre-Étienne Meunier
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+@@ -92,6 +95,7 @@
+     receiver: Receiver<Msg>,
+     sender: UnboundedSender<Reply>,
+     channels: HashMap<ChannelId, ChannelRef>,
++    receive_credit_notify: Arc<tokio::sync::Notify>,
+     target_window_size: u32,
+     pending_reads: Vec<Vec<u8>>,
+     pending_len: u32,
+@@ -117,7 +121,6 @@
+         proceed_with_methods: MethodSet,
+         partial_success: bool,
+     },
+-    ChannelOpenFailure,
+     SignRequest {
+         key: ssh_key::PublicKey,
+         data: Vec<u8>,
+@@ -311,6 +314,8 @@
+     receiver: UnboundedReceiver<Reply>,
+     join: russh_util::runtime::JoinHandle<Result<(), H::Error>>,
+     channel_buffer_size: usize,
++    direct_tcpip_receive_window: Option<u32>,
++    receive_credit_notify: Arc<tokio::sync::Notify>,
+ }
+ 
+ impl<H: Handler> Drop for Handle<H> {
+@@ -700,6 +705,7 @@
+         &self,
+         mut receiver: Receiver<ChannelMsg>,
+         window_size_ref: WindowSizeRef,
++        receive_credit: Option<Arc<crate::channels::ReceiveCredit>>,
+     ) -> Result<Channel<Msg>, crate::Error> {
+         loop {
+             match receiver.recv().await {
+@@ -717,7 +723,7 @@
+                             max_packet_size,
+                             window_size: window_size_ref,
+                         },
+-                        read_half: ChannelReadHalf { receiver },
++                        read_half: ChannelReadHalf { receiver, receive_credit },
+                     });
+                 }
+                 Some(ChannelMsg::OpenFailure(reason)) => {
+@@ -808,7 +814,7 @@
+             .send(Msg::ChannelOpenSession { channel_ref })
+             .await
+             .map_err(|_| crate::Error::SendError)?;
+-        self.wait_channel_confirmation(receiver, window_size_ref)
++        self.wait_channel_confirmation(receiver, window_size_ref, None)
+             .await
+     }
+ 
+@@ -830,7 +836,7 @@
+             })
+             .await
+             .map_err(|_| crate::Error::SendError)?;
+-        self.wait_channel_confirmation(receiver, window_size_ref)
++        self.wait_channel_confirmation(receiver, window_size_ref, None)
+             .await
+     }
+ 
+@@ -849,8 +855,14 @@
+         originator_address: B,
+         originator_port: u32,
+     ) -> Result<Channel<Msg>, crate::Error> {
+-        let (sender, receiver) = channel(self.channel_buffer_size);
+-        let channel_ref = ChannelRef::new(sender);
++        let capacity = self.direct_tcpip_receive_window
++            .map_or(self.channel_buffer_size, |window| window as usize + 4);
++        let (sender, receiver) = channel(capacity);
++        let mut channel_ref = ChannelRef::new(sender);
++        let receive_credit = self.direct_tcpip_receive_window.map(|_| {
++            crate::channels::ReceiveCredit::new(self.receive_credit_notify.clone())
++        });
++        channel_ref.receive_credit = receive_credit.clone();
+         let window_size_ref = channel_ref.window_size().clone();
+ 
+         self.sender
+@@ -863,7 +875,7 @@
+             })
+             .await
+             .map_err(|_| crate::Error::SendError)?;
+-        self.wait_channel_confirmation(receiver, window_size_ref)
++        self.wait_channel_confirmation(receiver, window_size_ref, receive_credit)
+             .await
+     }
+ 
+@@ -882,7 +894,7 @@
+             })
+             .await
+             .map_err(|_| crate::Error::SendError)?;
+-        self.wait_channel_confirmation(receiver, window_size_ref)
++        self.wait_channel_confirmation(receiver, window_size_ref, None)
+             .await
+     }
+ 
+@@ -1193,6 +1205,11 @@
+         );
+     }
+     let channel_buffer_size = config.channel_buffer_size;
++    let direct_tcpip_receive_window = config.direct_tcpip_receive_window_backpressure
++        .then_some(config.window_size);
++    if direct_tcpip_receive_window == Some(0) {
++        return Err(crate::Error::Inconsistent.into());
++    }
+     let mut session = Session::new(
+         config.window_size,
+         CommonSession {
+@@ -1214,6 +1231,7 @@
+         session_receiver,
+         session_sender,
+     );
++    let receive_credit_notify = session.receive_credit_notify.clone();
+     session.begin_rekey()?;
+     let (kex_done_signal, kex_done_signal_rx) = oneshot::channel();
+     let join = russh_util::runtime::spawn(session.run(stream, handler, Some(kex_done_signal)));
+@@ -1231,6 +1249,8 @@
+         receiver: handle_receiver,
+         join,
+         channel_buffer_size,
++        direct_tcpip_receive_window,
++        receive_credit_notify,
+     })
+ }
+ 
+@@ -1263,6 +1283,21 @@
+                 seqn: buffer.seqn,
+             })
+         }
++    }
++
++    fn drain_receive_credits(&mut self) -> Result<(), crate::Error> {
++        use std::sync::atomic::Ordering;
++        if let Some(enc) = self.common.encrypted.as_mut() {
++            for (id, channel) in &self.channels {
++                if let Some(credit) = &channel.receive_credit {
++                    let consumed = credit.consumed.swap(0, Ordering::AcqRel);
++                    if consumed != 0 {
++                        enc.replenish_receive_window(*id, consumed)?;
++                    }
++                }
++            }
++        }
++        Ok(())
+     }
+ 
+     fn new(
+@@ -1284,6 +1319,7 @@
+             inbound_channel_sender,
+             inbound_channel_receiver,
+             channels: HashMap::new(),
++            receive_credit_notify: Arc::new(tokio::sync::Notify::new()),
+             pending_reads: Vec::new(),
+             pending_len: 0,
+             open_global_requests: VecDeque::new(),
+@@ -1366,6 +1402,7 @@
+         let reading = start_reading(stream_read, buffer, opening_cipher);
+         pin!(reading);
+ 
++        let receive_credit_notify = self.receive_credit_notify.clone();
+         #[allow(clippy::panic)] // false positive in select! macro
+         while !self.common.disconnected {
+             self.common.received_data = false;
+@@ -1378,6 +1415,9 @@
+                 crate::future_or_pending(self.rekey_time_remaining(), tokio::time::sleep);
+             pin!(rekey_timer);
+             tokio::select! {
++                () = receive_credit_notify.notified(), if !self.kex.active() => {
++                    self.drain_receive_credits()?;
++                }
+                 r = &mut reading => {
+                     let (stream_read, mut buffer, mut opening_cipher) = match r {
+                         Ok((_, stream_read, buffer, opening_cipher)) => (stream_read, buffer, opening_cipher),
+@@ -2138,6 +2178,70 @@
+         (session, sender, reply_receiver)
+     }
+ 
++
++    fn backpressure_channel(session: &mut Session, window: u32, confirmed: bool)
++        -> (ChannelId, ChannelReadHalf)
++    {
++        let enc = session.common.encrypted.as_mut().unwrap();
++        enc.state = EncryptedState::Authenticated;
++        let id = enc.new_channel(window, window);
++        enc.channels.get_mut(&id).unwrap().confirmed = confirmed;
++        let (sender, receiver) = channel(window as usize + 4);
++        let credit = crate::channels::ReceiveCredit::new(session.receive_credit_notify.clone());
++        let mut reference = ChannelRef::new(sender);
++        reference.receive_credit = Some(credit.clone());
++        session.channels.insert(id, reference);
++        (id, ChannelReadHalf { receiver, receive_credit: Some(credit) })
++    }
++
++    fn backpressure_data(id: ChannelId, data: &[u8]) -> Vec<u8> {
++        let mut packet = vec![msg::CHANNEL_DATA];
++        id.encode(&mut packet).unwrap();
++        data.encode(&mut packet).unwrap();
++        packet
++    }
++
++    #[tokio::test]
++    async fn backpressure_window_requires_consumption_and_other_channel_progresses() {
++        let (mut session, _sender, _replies) = keyboard_interactive_session();
++        let (stalled, mut reader) = backpressure_channel(&mut session, 8, true);
++        let (healthy, mut other) = backpressure_channel(&mut session, 8, true);
++        for _ in 0..8 {
++            session.process_packet(&mut TestHandler, &backpressure_data(stalled, b"x")).await.unwrap();
++        }
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert_eq!(enc.channels[&stalled].sender_window_size, 0);
++        assert!(enc.write.is_empty(), "receiving alone must not grant window credit");
++        session.process_packet(&mut TestHandler, &backpressure_data(healthy, b"ok")).await.unwrap();
++        assert!(matches!(other.wait().await, Some(ChannelMsg::Data { .. })));
++        assert!(matches!(reader.wait().await, Some(ChannelMsg::Data { .. })));
++        // The notification remains stored if the event loop was doing rekey work.
++        tokio::time::timeout(Duration::from_millis(100), session.receive_credit_notify.notified()).await.unwrap();
++        session.drain_receive_credits().unwrap();
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert_eq!(enc.channels[&stalled].sender_window_size, 1);
++        assert_eq!(enc.channels[&healthy].sender_window_size, 8);
++        assert!(!enc.write.is_empty(), "consumption schedules SSH window-adjust packets");
++        assert!(session.process_packet(&mut TestHandler, &backpressure_data(stalled, b"xx")).await.is_err());
++    }
++
++    #[tokio::test]
++    async fn backpressure_late_confirmation_after_cancel_closes_and_releases_queue() {
++        let (mut session, _sender, _replies) = keyboard_interactive_session();
++        let (id, reader) = backpressure_channel(&mut session, 8, false);
++        drop(reader);
++        let mut packet = vec![msg::CHANNEL_OPEN_CONFIRMATION];
++        id.encode(&mut packet).unwrap();
++        42u32.encode(&mut packet).unwrap();
++        8u32.encode(&mut packet).unwrap();
++        8u32.encode(&mut packet).unwrap();
++        session.process_packet(&mut TestHandler, &packet).await.unwrap();
++        assert!(!session.channels.contains_key(&id));
++        let enc = session.common.encrypted.as_ref().unwrap();
++        assert!(!enc.channels.contains_key(&id));
++        assert!(!enc.write.is_empty(), "late-confirmed canceled channel must send CLOSE");
++    }
++
+     const HOSTKEYS_SESSION_ID: &[u8] = b"hostkeys-session-id";
+ 
+     /// An authenticated session with one outstanding `hostkeys-prove-00` request.
+@@ -2651,6 +2755,11 @@
+     pub maximum_packet_size: u32,
+     /// Buffer size for each channel (a number of unprocessed messages to store before propagating backpressure to the TCP stream)
+     pub channel_buffer_size: usize,
++    /// Opt in to bounded, consumption-driven receive windows for direct-tcpip.
++    /// Queues hold at most window_size nonempty data messages plus four lifecycle
++    /// slots. Only data/extended-data/open/eof/close messages are delivered for
++    /// these byte streams. Other channel kinds retain upstream behavior.
++    pub direct_tcpip_receive_window_backpressure: bool,
+     /// Lists of preferred algorithms.
+     pub preferred: negotiation::Preferred,
+     /// Time after which the connection is garbage-collected.
+@@ -2680,6 +2789,7 @@
+             window_size: 2097152,
+             maximum_packet_size: 32768,
+             channel_buffer_size: 100,
++            direct_tcpip_receive_window_backpressure: false,
+             preferred: Default::default(),
+             inactivity_timeout: None,
+             keepalive_interval: None,
+--- a/src/client/session.rs
++++ b/src/client/session.rs
+@@ -1,3 +1,6 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ use log::error;
+ use ssh_encoding::Encode;
+ use tokio::sync::oneshot;
+@@ -538,6 +541,11 @@
+     }
+ 
+     pub fn close(&mut self, channel: ChannelId) -> Result<(), crate::Error> {
++        // Upstream removes encrypted state immediately on local close, so its
++        // subsequent peer CLOSE is ignored. Release this opt-in queue here.
++        if self.channels.get(&channel).is_some_and(|channel| channel.receive_credit.is_some()) {
++            self.channels.remove(&channel);
++        }
+         if let Some(ref mut enc) = self.common.encrypted {
+             enc.close(channel)
+         } else {
+--- a/src/server/session.rs
++++ b/src/server/session.rs
+@@ -1,3 +1,6 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ use std::collections::{HashMap, VecDeque};
+ use std::io::ErrorKind;
+ use std::sync::Arc;
+@@ -414,7 +417,7 @@
+                             max_packet_size,
+                             window_size: window_size_ref,
+                         },
+-                        read_half: ChannelReadHalf { receiver },
++                        read_half: ChannelReadHalf { receiver, receive_credit: None },
+                     });
+                 }
+                 Some(ChannelMsg::OpenFailure(reason)) => {
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -1,3 +1,6 @@
++// Modified for proxrs: bounded consumption-driven direct-tcpip receive windows.
++// See PROXRS_PATCH.md for provenance, behavior, and verification.
++
+ // Copyright 2016 Pierre-Étienne Meunier
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+@@ -302,6 +305,31 @@
+         }
+     }
+ 
++    pub(crate) fn consume_receive_window(&mut self, id: ChannelId, bytes: usize) -> Result<(), crate::Error> {
++        if let Some(channel) = self.channels.get_mut(&id) {
++            if bytes > channel.sender_window_size as usize
++                || bytes > channel.sender_maximum_packet_size as usize {
++                return Err(crate::Error::Inconsistent);
++            }
++            channel.sender_window_size -= bytes as u32;
++        }
++        Ok(())
++    }
++
++    pub(crate) fn replenish_receive_window(&mut self, id: ChannelId, bytes: u32) -> Result<(), crate::Error> {
++        if let Some(channel) = self.channels.get_mut(&id) {
++            if !channel.confirmed { return Ok(()); }
++            channel.sender_window_size = channel.sender_window_size.checked_add(bytes)
++                .ok_or(crate::Error::Inconsistent)?;
++            push_packet!(self.write, {
++                self.write.push(msg::CHANNEL_WINDOW_ADJUST);
++                channel.recipient_channel.encode(&mut self.write)?;
++                bytes.encode(&mut self.write)?;
++            });
++        }
++        Ok(())
++    }
++
+     pub fn adjust_window_size(
+         &mut self,
+         channel: ChannelId,

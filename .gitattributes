@@ -1,0 +1,3 @@
+# Preserve upstream Markdown and valid blank context lines in the auditable patch.
+vendor/russh/README.md -whitespace
+vendor/russh/consumption-window.patch -whitespace
