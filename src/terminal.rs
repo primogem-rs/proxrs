@@ -4,11 +4,104 @@
 use anyhow::{Context, Result, bail};
 use std::{
     fs::{File, OpenOptions},
-    io::{self, BufRead, Read, Write},
+    io::{self, BufRead, IsTerminal, Read, Write},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    path::Path,
     time::Duration,
 };
 use zeroize::Zeroizing;
+
+pub fn approve_install(destination: &Path) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        bail!(
+            "install destination {:?} already exists; replacement requires an interactive terminal or --force",
+            destination
+        );
+    }
+    eprint!("Replace {:?}? [y/N] ", destination);
+    io::stderr()
+        .flush()
+        .context("could not display install prompt")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("could not read install approval")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+pub fn installation_declined(destination: &Path) {
+    eprintln!(
+        "Installation cancelled; {:?} was left unchanged.",
+        destination
+    );
+}
+
+pub fn installation_complete(
+    destination: &Path,
+    status: &crate::install::PathStatus,
+) -> Result<()> {
+    use crate::install::PathStatus;
+
+    eprintln!("Installed proxrs at {:?}", destination);
+    match status {
+        PathStatus::Ready => {
+            eprintln!("proxrs is available on PATH.");
+            return Ok(());
+        }
+        PathStatus::Missing => eprintln!("The install directory is not on PATH."),
+        PathStatus::Shadowed(other) => {
+            eprintln!("Another proxrs takes precedence on PATH: {:?}", other);
+        }
+    }
+    let directory = destination
+        .parent()
+        .expect("install destination has a parent");
+    let shell = std::env::var_os("SHELL");
+    let name = shell
+        .as_deref()
+        .and_then(|shell| Path::new(shell).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let mut command = Vec::new();
+    let startup_file = match name {
+        "sh" | "bash" | "zsh" => {
+            command.extend_from_slice(b"export PATH=");
+            if name == "sh" {
+                shell_quote::Sh::quote_into_vec(directory, &mut command);
+            } else {
+                shell_quote::Bash::quote_into_vec(directory, &mut command);
+            }
+            command.extend_from_slice(b"\"${PATH:+:$PATH}\"\n");
+            match name {
+                "zsh" => "your zsh startup file (usually ~/.zshrc)",
+                "bash" => "your bash startup file (usually ~/.bashrc or ~/.bash_profile)",
+                _ => "your shell's startup file",
+            }
+        }
+        "fish" => {
+            command.extend_from_slice(b"fish_add_path --path --prepend --move -- ");
+            shell_quote::Fish::quote_into_vec(directory, &mut command);
+            command.push(b'\n');
+            "your fish startup file (usually ~/.config/fish/config.fish)"
+        }
+        _ => {
+            eprintln!(
+                "Shell detection from SHELL is unavailable or unsupported (supported: sh, bash, zsh, fish). Add {:?} to PATH using your shell's syntax.",
+                directory
+            );
+            return Ok(());
+        }
+    };
+    eprintln!("For {name} (selected by SHELL), run this in your current terminal:");
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&command)?;
+    stdout.flush()?;
+    eprintln!("For future terminals, add the same command to {startup_file}.");
+    Ok(())
+}
 
 pub async fn password_from_stdin() -> Result<Zeroizing<String>> {
     let (sender, receiver) = tokio::sync::oneshot::channel();

@@ -1,5 +1,6 @@
 mod cli;
 mod client_connection;
+mod install;
 mod managed;
 mod proxy;
 mod session;
@@ -11,6 +12,7 @@ use clap::Parser;
 #[tokio::main]
 async fn main() {
     let result = match cli::Cli::parse().command {
+        cli::Command::Install(options) => install::install(options),
         cli::Command::Up(options) => session::up(options).await,
         cli::Command::Run(options) => session::managed(options).await,
     };

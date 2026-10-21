@@ -66,6 +66,35 @@ Options:
 
 The listener is IPv4 loopback (`127.0.0.1`) in v1; exposing it to the LAN is out of scope. The SSH server and destinations may use IPv4 or IPv6. Argument values are passed through typed APIs, never interpolated into shell commands.
 
+## Local installation
+
+- `proxrs install` installs the executable being invoked into a user-owned bin directory. The intended workflow starts with `cargo build --release` and `./target/release/proxrs install`.
+- The default location is `~/.local/bin/proxrs`; `--bin-dir <directory>` overrides the bin directory. Create the directory when needed without invoking sudo.
+- An install directory containing `:` cannot be represented in PATH and is rejected, including when resolving a directory symlink reveals a colon.
+- Install an independent copy of the invoked binary, so moving or deleting the checkout and running `cargo clean` do not break the installed command.
+- Accept both release and debug builds; release compilation is the documented workflow rather than an installation restriction.
+- If the destination already contains `proxrs`, prompt before replacing it even when its contents are identical, defaulting to No. `--force` skips the prompt. Without an interactive terminal, replacement fails with instructions to use `--force`. Declining leaves the existing binary untouched and exits successfully.
+- Installation does not build or download a binary, require SSH connection details, or start a proxy session.
+- Installation never modifies the parent shell or shell profile files. If PATH setup is needed, it prints the setup command for the user to apply.
+- Installation succeeds even if the install directory is missing from PATH or another `proxrs` takes precedence. Report the installed path and any remaining shell setup separately, and print a command to prepend the install directory when needed.
+- Select the user's shell automatically where possible, using a maintained library when suitable, without adding a shell-selection option. Print setup instructions for `sh`, `bash`, `zsh`, and `fish`. If shell detection is unavailable or the shell is unsupported, still install successfully and report the installed path and the detection or support limitation without guessing a setup command.
+- Printed PATH commands affect the current shell session. Explain how the user can save the command in their shell's startup configuration for future sessions; proxrs does not edit that configuration.
+- Print setup commands to stdout and status, prompts, and diagnostics to stderr.
+
+```sh
+cargo build --release
+./target/release/proxrs install
+./target/release/proxrs install --bin-dir /chosen/bin
+./target/release/proxrs install --force
+```
+
+Validate installation with the actual CLI in temporary directories and isolated HOME/PATH environments, without SSH or Docker:
+
+1. Default and custom locations receive an executable independent copy, usable after removing its source copy. No SSH arguments, credentials, or network access are needed.
+2. Existing destinations prompt even for identical contents. Approval and `--force` allow replacement; No or an empty answer preserves the destination and exits successfully. Noninteractive replacement without `--force` fails clearly.
+3. Missing PATH entries and an earlier competing `proxrs` produce actionable setup instructions without failing installation. Supported-shell commands safely handle directories containing spaces, apostrophes, and backslashes. Unknown or unavailable shell detection does not produce guessed syntax.
+4. Shell startup configuration remains untouched. A failed copy must preserve any existing executable and leave no partial installed binary.
+
 ## Credentials and host trust
 
 1. Validate CLI arguments and obtain the server's SSH host key.
