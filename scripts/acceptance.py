@@ -70,9 +70,58 @@ def source():
     }
 
 
+class Progress:
+    """Read appended log bytes without changing the child's output destination."""
+
+    def __init__(self, name, started):
+        self.name = name
+        self.started = started
+        self.partial = b""
+        self.discard = False
+        self.last_output = started
+        self.last_result = None
+
+    def read(self, log, final=False):
+        # Bound both buffering and each poll's work, even as the child appends.
+        remaining = os.fstat(log.fileno()).st_size - log.tell()
+        while remaining > 0:
+            chunk = log.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            lines = (self.partial + chunk).split(b"\n")
+            self.partial = lines.pop()
+            for line in lines:
+                if not self.discard:
+                    self.line(line)
+                self.discard = False
+            if self.discard or len(self.partial) > 4096:
+                self.partial = b""
+                self.discard = True
+        if final and self.partial and not self.discard:
+            self.line(self.partial)
+            self.partial = b""
+        if not final and time.monotonic() - self.last_output >= 30:
+            detail = (f"last result: {self.last_result}" if self.last_result is not None
+                      else "no completed cases yet")
+            self.emit(f"RUNNING — {detail}")
+
+    def line(self, line):
+        if len(line) <= 4096 and line.startswith((b"PASS:", b"PASS ")):
+            text = line.rstrip(b"\r").decode("utf-8", errors="replace")
+            self.last_result = text[5:].strip()
+            self.emit(text)
+
+    def emit(self, text):
+        self.last_output = time.monotonic()
+        elapsed = int(self.last_output - self.started)
+        print(f"[{self.name} +{elapsed}s] {text}", flush=True)
+
+
 class Run:
-    def __init__(self, output, suites, images):
+    def __init__(self, output, suites, images, progress=False):
         self.output = output
+        self.progress = progress
         self.signum = None
         self.active = None
         self.signal_delivered = False
@@ -140,6 +189,25 @@ class Run:
             except ProcessLookupError:
                 pass
 
+    def wait(self, process, step, started):
+        if not self.progress:
+            return process.wait()
+        progress = Progress(step["name"], started)
+        try:
+            with (self.output / step["log"]).open("rb") as log:
+                while True:
+                    try:
+                        result = process.wait(timeout=.25)
+                    except subprocess.TimeoutExpired:
+                        progress.read(log)
+                    else:
+                        progress.read(log, final=True)
+                        return result
+        except (OSError, UnicodeError):
+            # An unavailable progress display must not abandon an owned child.
+            # Signal forwarding stays active until it finishes its cleanup.
+            return process.wait()
+
     def step(self, step):
         if self.signum:
             raise Interrupted("Acceptance interrupted")
@@ -168,7 +236,7 @@ class Run:
                 self.active = (process, step["category"])
                 # Also handles a signal arriving between spawn and registration.
                 self.forward_signal()
-                step["exit_code"] = process.wait()
+                step["exit_code"] = self.wait(process, step, started)
             if self.signum:
                 raise Interrupted("Acceptance interrupted; child cleanup finished")
             if step["exit_code"]:
@@ -285,6 +353,7 @@ def main():
     parser.add_argument("--suites", nargs="+", choices=SUITES, default=list(SUITES))
     parser.add_argument("--images", nargs="+", choices=IMAGES, default=list(IMAGES))
     parser.add_argument("--output", type=Path, help="New report directory (default: target/acceptance/<run>)")
+    parser.add_argument("--progress", action="store_true", help="Show live case results and quiet-period heartbeats")
     args = parser.parse_args()
     os.umask(0o077)
     output = (args.output or ROOT / "target/acceptance" /
@@ -299,7 +368,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     for directory in ("logs", "fixtures", "results"):
         (output / directory).mkdir()
-    return Run(output, list(dict.fromkeys(args.suites)), list(dict.fromkeys(args.images))).execute()
+    return Run(output, list(dict.fromkeys(args.suites)), list(dict.fromkeys(args.images)), args.progress).execute()
 
 
 if __name__ == "__main__":

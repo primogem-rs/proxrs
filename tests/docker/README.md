@@ -6,6 +6,8 @@ The repeatable entry point for acceptance is:
 
 ```sh
 python3 scripts/acceptance.py
+# Show completed cases and quiet-period heartbeats while suites run:
+python3 scripts/acceptance.py --progress
 # Focused checks still build first:
 python3 scripts/acceptance.py --suites http cleanup --images ubuntu:24.04
 # Save to a new directory outside the repository (existing directories are refused):
@@ -29,6 +31,15 @@ on both `ubuntu:24.04` and `debian:12`. `--suites` and `--images` select a subse
 only selected checks count as tested. Debug is built for proxrs suites, and
 release is also built when `load` is selected. A smoke-only run tests the fixture
 and does not build or test proxrs. The first failed step stops the run.
+
+`--progress` prints each complete `PASS:` or `PASS ` result once, prefixed with
+the active step name and elapsed seconds. After 30 seconds without a result, it
+prints a `RUNNING` heartbeat naming the last completed case (or noting that none
+has completed yet); heartbeats repeat every 30 quiet seconds. Build steps also
+heartbeat. The last completed case is not an indication of which case is running
+now. Progress reads appended log bytes while the child runs; original logs and
+their hashes are preserved. Other output and lines longer than 4096 bytes remain
+in the logs only. Without the flag, output stays at step-level status messages.
 
 Each new report directory (default `target/acceptance/<UTC time>-<unique ID>/`)
 contains:
