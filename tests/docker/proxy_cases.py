@@ -189,8 +189,8 @@ def authentication_cases(fixture):
     pam = fixture.docker("cat", "/etc/pam.d/sshd")
     try:
         fixture.docker("sh", "-c", "cat > /etc/pam.d/sshd", input=b"auth optional pam_exec.so /bin/sleep 30\n" + pam)
-        elapsed = expect_startup_failure(fixture, "startup deadline", limit=14)
-        assert 9 <= elapsed <= 13, elapsed
+        elapsed = expect_startup_failure(fixture, "startup deadline", limit=54)
+        assert 46 <= elapsed <= 53, elapsed
     finally:
         fixture.docker("sh", "-c", "cat > /etc/pam.d/sshd", input=pam)
     config = fixture.docker("cat", "/etc/ssh/sshd_config")
@@ -304,19 +304,30 @@ for path in Path('/proc').iterdir():
         except (FileNotFoundError, ProcessLookupError):
             pass
 """)
-        assert process.wait(timeout=5) != 0
+        assert process.poll() is None
         try:
             assert stream.recv(100) == b"", "failed tunnel injected application bytes"
         except ConnectionResetError:
             pass
         fixture.processes[-1][2].seek(0)
         assert "SSH connection lost" in fixture.processes[-1][2].read()
-        with contextlib.suppress(ConnectionRefusedError):
-            with socket.create_connection(("127.0.0.1", fixture.proxy_port), timeout=1):
-                raise AssertionError("listener survived SSH loss")
+        with fixture.connect(status=503):
+            pass
+        deadline = time.monotonic() + 6
+        while True:
+            try:
+                fixture.https()
+                break
+            except (AssertionError, OSError):
+                assert time.monotonic() < deadline, "SSH did not recover"
+                time.sleep(.05)
+        process.terminate()
+        assert process.wait(timeout=5) == 0
+        with socket.socket() as probe:
+            assert probe.connect_ex(("127.0.0.1", fixture.proxy_port)) != 0, "listener survived shutdown"
     finally:
         stream.close()
-    print("PASS: real SSH loss closes active tunnel/listener and exits nonzero")
+    print("PASS: real SSH loss closes active tunnel, returns503, recovers, then cleans listener on shutdown")
 
 def main():
     parser = argparse.ArgumentParser()

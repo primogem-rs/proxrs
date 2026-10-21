@@ -1,4 +1,4 @@
-# Pinned russh and the proxrs receive-window patch
+# Pinned russh and the proxrs transport patches
 
 This directory is the crates.io release of **russh 0.64.1**, from upstream commit
 `e5d80a07dc554480b6ea3b2e14adfc190407b627`. The source retains its upstream
@@ -35,6 +35,12 @@ channel state on close, and avoids accumulating unrelated authentication replies
 for direct-tcpip failures. These paths keep failed requests and repeated
 cancellation from retaining session state indefinitely.
 
+## Authentication result and disconnect preservation
+
+Upstream's password reply helper fabricated an `AuthResult::Failure` when its reply channel closed without an SSH authentication result. A real transport drop during PAM authentication was therefore indistinguishable from a wrong password. The helper now returns typed `Error::RecvError` for that case; an actual queued rejection still returns `AuthResult::Failure`, even if the driver has closed. Proxrs combines the typed error with the driver's bounded disconnect notification, keeping explicit authentication exhaustion, policy, and protocol reasons terminal while allowing transport/service failures to retry. It neither guesses from `is_closed()` nor reads arbitrary remote descriptions to classify failures.
+
+The client session now delivers a received SSH disconnect reason before propagating an I/O shutdown error. Otherwise a reset during teardown could hide an explicit server rejection. An existing driver error also remains the reported cause rather than being replaced by a shutdown error. These changes preserve the distinction between protocol replies and transport disappearance; they add no authentication retries inside russh.
+
 ## Verification and maintenance
 
 Six focused upstream tests exercise exact partial-read credits, empty/control
@@ -44,6 +50,14 @@ readers alongside sixteen successful HTTPS requests, and a stalled destination
 open alongside healthy requests before and after its 10-second timeout, against
 Ubuntu and Debian OpenSSH. See `tests/docker/proxy_cases.py` and its README.
 
-When updating russh, rebase this explicit patch, review the credit/queue invariants,
+The additional `client::test::password_auth_distinguishes_rejection_from_transport_loss` test starts a real loopback SSH server and verifies both transport disappearance during password authentication and a queued explicit rejection. The macOS actual-binary recovery suite reproduces the PAM drop and MaxAuthTries=1 close against Ubuntu and Debian OpenSSH. All 192 library tests pass with the same crypto features used by proxrs:
+
+```sh
+cargo test --manifest-path vendor/russh/Cargo.toml --no-default-features --features ring,rsa --lib
+```
+
+`consumption-window.patch` includes every source change against the documented pristine release, including the authentication and teardown changes. Apply it with `patch -p1` at the upstream crate root; the final acceptance checks verify the patched source matches this vendor directory byte for byte.
+
+When updating russh, rebase this explicit patch, review the credit/queue and authentication-result invariants,
 and rerun both the focused tests and the real-binary concurrency regressions.
 Remove the patch only after an upstream version provides equivalent behavior.

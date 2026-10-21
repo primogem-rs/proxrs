@@ -26,7 +26,9 @@ The proxy forwards ordinary HTTP/1.1 requests and streams uploads and responses 
 
 After authentication and listener binding, `up` prints six shell exports. Apply them in a second shell while proxrs remains running. Both HTTP/HTTPS variable variants use an `http://127.0.0.1:<port>` URL; HTTPS uses an opaque CONNECT tunnel with the application's own TLS verification. Proxy exclusions default to loopback only. These variables configure cooperating clients; exclusions and applications that ignore proxy variables can connect directly.
 
-Ctrl-C or SIGTERM stops the foreground proxy and its tunnels. In this slice, SSH loss ends the session with a nonzero status. Bounded recovery is tracked by the remaining [v0.1 tickets](https://github.com/primogem-rs/proxrs/issues/1); see [SPEC.md](SPEC.md).
+Ctrl-C or SIGTERM stops the foreground proxy and its tunnels. Transient SSH failures use at most three retries, delayed by 1, 2, and 4 seconds. Each attempt has a shared 10-second network/authentication budget excluding human prompt time. Startup and subsequent short-lived connections share the retry budget; 60 continuous seconds of readiness restores all three retries. Wrong passwords, unsupported authentication, host-trust failures, and protocol or policy rejection stop immediately.
+
+During recovery, interrupted HTTP requests and tunnels fail, the same listener returns 503 for new requests, and the next authenticated SSH connection serves new work. Requests are never replayed or sent directly by proxrs. The password is retained in zeroizing memory for the session and released on shutdown. SSH keepalives run every 15 seconds; three unanswered probes detect a silent connection loss at approximately 60 seconds. Healthy quiet tunnels remain open. Exhausted retries close the listener and exit nonzero.
 
 ## Managed commands
 
@@ -42,7 +44,7 @@ secret-provider read ssh-password | cargo run -- run \
 
 Child stdout/stderr remain available, and `run` does not print export instructions. Hidden password entry preserves terminal input. With `--password-stdin`, the command receives a fresh blocking controlling-terminal descriptor when available, otherwise null input; it never receives the password pipe. The command owns terminal Ctrl-C, so a command that handles it and continues keeps its proxy. Proxrs restores the prior foreground process group and terminal settings on exit, including launch errors.
 
-Normal command completion closes the proxy, cleans remaining members of the command's process group, and returns the command's status. Directed SIGINT/SIGTERM and, until bounded recovery lands, SSH loss close the proxy and terminate the owned group. Cleanup allows five seconds before SIGKILL. Unrelated processes and already running services are never owned; deliberately detached daemons are outside this process-group guarantee. A signal-ended command returns `128 + signal`.
+Normal command completion closes the proxy, cleans remaining members of the command's process group, and returns the command's status. The command remains running during SSH retries and can use the proxy again after recovery. Directed SIGINT/SIGTERM or exhausted retries close the proxy and terminate the owned group; command completion cancels pending retries. Cleanup allows five seconds before SIGKILL. Unrelated processes and already running services are never owned; deliberately detached daemons are outside this process-group guarantee. A signal-ended command returns `128 + signal`.
 
 ## Development
 
@@ -60,11 +62,13 @@ python3 tests/docker/run_cases.py --image ubuntu:24.04
 python3 tests/docker/run_cases.py --image debian:12
 python3 tests/docker/http_cases.py --image ubuntu:24.04
 python3 tests/docker/http_cases.py --image debian:12
+python3 tests/docker/recovery_cases.py --image ubuntu:24.04
+python3 tests/docker/recovery_cases.py --image debian:12
 cargo build --release
 python3 tests/docker/load_cases.py --image ubuntu:24.04
 python3 tests/docker/load_cases.py --image debian:12
 ```
 
-The SSH transport uses maintained russh with an explicit, pinned [receive-window patch](vendor/russh/PROXRS_PATCH.md) to keep stalled channels from blocking healthy ones. Hyper handles HTTP and CONNECT; a bounded httparse ingress pass rejects ambiguous framing before Hyper normalizes headers. See the [HTTP acceptance report](tests/docker/HTTP_ACCEPTANCE.md) for protocol cases, cancellation, limits, and measured release RSS.
+The SSH transport uses maintained russh with an explicit, pinned [receive-window and authentication-result patch](vendor/russh/PROXRS_PATCH.md) to keep stalled channels from blocking healthy ones. Hyper handles HTTP and CONNECT; a bounded httparse ingress pass rejects ambiguous framing before Hyper normalizes headers. See the [HTTP acceptance report](tests/docker/HTTP_ACCEPTANCE.md) for protocol cases and bounds, and the [assembled acceptance report](tests/docker/ACCEPTANCE.md) for recovery, lifecycle, and final release RSS measurements.
 
 Default Rust tests drive CLI validation, port collision, and cancellation without Docker, credentials, or internet services. The smoke script validates the OpenSSH fixture. The Python cases exercise the actual proxrs binary through real SSH and controlled origins. See [fixture details](tests/docker/README.md) for prerequisites, isolation, and the acceptance coverage.

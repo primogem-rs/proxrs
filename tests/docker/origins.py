@@ -11,11 +11,21 @@ import ssl
 import threading
 
 uploaded = [0]
+counted = [0]
+counted_lock = threading.Lock()
 
 class Origin(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
     def do_GET(self):
+        if self.path == '/counted':
+            with counted_lock:
+                body = str(counted[0]).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == '/no-response':
             self.close_connection = True
             return
@@ -132,6 +142,17 @@ class Origin(http.server.BaseHTTPRequestHandler):
                     return
                 uploaded[0] += len(data)
                 remaining -= len(data)
+        if self.path == '/counted':
+            with counted_lock:
+                counted[0] += 1
+            self.send_response(200)
+            self.send_header('Content-Length', '1000')
+            self.end_headers()
+            self.wfile.write(b'first')
+            self.wfile.flush()
+            time.sleep(15)
+            self.close_connection = True
+            return
         body = str(uploaded[0]).encode()
         self.send_response(200)
         self.send_header('Content-Length', str(len(body)))

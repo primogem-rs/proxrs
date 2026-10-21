@@ -127,83 +127,80 @@ def alive(pid):
 
 
 def descendant_cleanup(fixture):
-    sentinel = subprocess.Popen(['sleep', '60'], start_new_session=True)
+    from recovery_cases import SSHRelay, wait_for
+    sentinel = subprocess.Popen(['sleep', '90'], start_new_session=True)
     try:
         for stubborn in (False, True):
             for finish in ('exit', 'terminate', 'interrupt', 'ssh_loss'):
-                out = open(fixture.path / 'managed-out', 'w+')
-                err = open(fixture.path / 'managed-err', 'w+')
-                process = subprocess.Popen(run_args(fixture, ['descendants', str(fixture.path / 'ca.pem'), 'stubborn' if stubborn else 'cooperative', finish]),
-                                           stdin=subprocess.PIPE, stdout=out, stderr=err, start_new_session=True)
-                child = None
-                try:
-                    process.stdin.write((fixture.password + '\n').encode())
-                    process.stdin.close()
-                    deadline = time.monotonic() + 15
-                    while time.monotonic() < deadline:
-                        out.seek(0)
-                        line = out.readline()
-                        if line:
-                            child = json.loads(line)
-                            break
-                        assert process.poll() is None, 'managed command failed before child readiness'
-                        time.sleep(.03)
-                    assert child is not None, 'managed command did not start'
-                    # The descendant has installed its disposition by now.
-                    time.sleep(.2)
-                    start = time.monotonic()
-                    if finish == 'terminate':
-                        process.terminate()
-                    elif finish == 'interrupt':
-                        process.send_signal(signal.SIGINT)
-                    elif finish == 'ssh_loss':
-                        fixture.docker('python3', '-c', """import os, pathlib, signal
-for path in pathlib.Path('/proc').iterdir():
-    if path.name.isdigit() and path.name != '1':
-        try:
-            if (path / 'comm').read_text().strip().startswith('sshd'):
-                os.kill(int(path.name), signal.SIGKILL)
-        except (FileNotFoundError, ProcessLookupError):
-            pass
-""")
-                    if stubborn:
-                        # Shutdown must close the proxy while the command is
-                        # still using its full termination grace period.
-                        deadline = time.monotonic() + 1
-                        while True:
-                            with socket.socket() as probe:
-                                closed = probe.connect_ex(('127.0.0.1', urlsplit(child['proxy']).port)) != 0
-                            if closed:
+                relay_context = SSHRelay(fixture) if finish == 'ssh_loss' else contextlib.nullcontext()
+                with relay_context as relay:
+                    out = open(fixture.path / 'managed-out', 'w+')
+                    err = open(fixture.path / 'managed-err', 'w+')
+                    process = subprocess.Popen(run_args(fixture, ['descendants', str(fixture.path / 'ca.pem'), 'stubborn' if stubborn else 'cooperative', finish]),
+                                               stdin=subprocess.PIPE, stdout=out, stderr=err, start_new_session=True)
+                    child = None
+                    try:
+                        process.stdin.write((fixture.password + '\n').encode())
+                        process.stdin.close()
+                        deadline = time.monotonic() + 15
+                        while time.monotonic() < deadline:
+                            out.seek(0)
+                            line = out.readline()
+                            if line:
+                                child = json.loads(line)
                                 break
-                            assert time.monotonic() < deadline, 'listener stayed open during process cleanup'
-                            time.sleep(.02)
-                    status = process.wait(timeout=8)
-                    out.seek(0)
-                    err.seek(0)
-                    assert fixture.password not in out.read() + err.read(), 'password leaked' 
-                    elapsed = time.monotonic() - start
-                    assert status == (17 if finish == 'exit' else 1 if finish == 'ssh_loss' else 0), status
-                    assert not alive(child['pid']) and not alive(child['descendant']), 'owned process survived shutdown'
-                    if stubborn:
-                        assert 4.5 <= elapsed <= 7, elapsed
-                    else:
-                        assert elapsed < 3, elapsed
-                    assert sentinel.poll() is None, 'unrelated process was signaled'
-                    with socket.socket() as probe:
-                        assert probe.connect_ex(('127.0.0.1', urlsplit(child['proxy']).port)) != 0
-                finally:
-                    if process.poll() is None:
-                        process.kill()
-                        process.wait()
-                    if child:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(child['pid'], signal.SIGKILL)
-                    out.close()
-                    err.close()
+                            assert process.poll() is None, 'managed command failed before child readiness'
+                            time.sleep(.03)
+                        assert child is not None, 'managed command did not start'
+                        time.sleep(.2)
+                        start = time.monotonic()
+                        if finish == 'terminate':
+                            process.terminate()
+                        elif finish == 'interrupt':
+                            process.send_signal(signal.SIGINT)
+                        elif finish == 'ssh_loss':
+                            relay.change('reject')
+                            time.sleep(.2)
+                            assert alive(child['pid']) and alive(child['descendant']), 'retry killed the managed command early'
+                            assert process.poll() is None
+                        port = urlsplit(child['proxy']).port
+                        def listener_closed():
+                            with socket.socket() as probe:
+                                return probe.connect_ex(('127.0.0.1', port)) != 0
+                        if stubborn:
+                            wait_for(listener_closed, 10 if relay else 1, 'listener closure before shutdown grace')
+                            assert alive(child['descendant']), 'stubborn descendant did not receive a grace period'
+                        status = process.wait(timeout=15 if relay else 8)
+                        out.seek(0)
+                        err.seek(0)
+                        assert fixture.password not in out.read() + err.read(), 'password leaked'
+                        elapsed = time.monotonic() - start
+                        assert status == (17 if finish == 'exit' else 1 if finish == 'ssh_loss' else 0), status
+                        assert not alive(child['pid']) and not alive(child['descendant']), 'owned process survived shutdown'
+                        retry_seconds = 7 if relay else 0
+                        if stubborn:
+                            assert retry_seconds+4.5 <= elapsed <= retry_seconds+7, elapsed
+                        else:
+                            assert elapsed < retry_seconds+3, elapsed
+                            if relay:
+                                assert elapsed >= retry_seconds-.5, elapsed
+                        if relay:
+                            assert len(relay.attempts) == 4, relay.attempts
+                        assert sentinel.poll() is None, 'unrelated process was signaled'
+                        assert listener_closed()
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+                        if child:
+                            with contextlib.suppress(ProcessLookupError):
+                                os.killpg(child['pid'], signal.SIGKILL)
+                        out.close()
+                        err.close()
     finally:
         sentinel.terminate()
         sentinel.wait()
-    print('PASS: cooperative/stubborn process-group cleanup on normal exit and directed termination; unrelated process survives')
+    print('PASS: cooperative/stubborn cleanup on completion, directed signals and exhausted retries; unrelated process survives')
 
 
 def startup_and_launch_failures(fixture):

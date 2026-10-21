@@ -1,6 +1,6 @@
 # proxrs v0.1 specification
 
-Status: agreed v0.1 specification, 2026-10-21. The Rust CLI is not implemented yet. Implementation is tracked in [issue #1](https://github.com/primogem-rs/proxrs/issues/1).
+Status: implemented v0.1 contract, 2026-10-21. The Rust CLI and bounded recovery are covered by the [assembled acceptance report](tests/docker/ACCEPTANCE.md). Implementation is tracked in [issue #1](https://github.com/primogem-rs/proxrs/issues/1).
 
 ## Purpose
 
@@ -35,7 +35,7 @@ Select the Rust SSH and HTTP libraries during the first implementation slice. Ev
 
 ## CLI contract
 
-Planned examples; these commands do not work yet:
+Examples (build with `cargo build --release` and use `target/release/proxrs`):
 
 ```sh
 # Prompts for the SSH password; runs until interrupted.
@@ -151,9 +151,9 @@ The release is ready only when these pass against the actual Rust binary:
 7. `run` forwards command arguments literally, supplies the correct child environment, and preserves interactive terminal behavior, including when the SSH password is piped in. Without a controlling terminal, password-from-stdin mode gives the child null input. Verify that a child handling Ctrl-C can continue using the proxy, that child completion closes it and propagates the exit status, and that explicit termination of proxrs or exhausted reconnects cleans up the managed process group. Verify terminal ownership is restored on exit.
 8. Teardown leaves no proxy listener, member of the managed process group, test container, or credential file behind. Unrelated processes must remain untouched. Any deliberately detached processes created by a test are cleaned up by the test harness. Logs never contain passwords, authorization headers, or request bodies.
 
-Use deterministic container-local origins and generic HTTP clients, with no production credentials or billable API calls. Test the real CLI and local HTTP endpoint, observing standard streams, environment output, exit status, and a controlled managed command's behavior rather than private module internals. The initial Docker harness validates password SSH and direct forwarding only; see [fixture instructions](tests/docker/README.md). Specific applications, providers, login flows, and token refresh are not release acceptance targets.
+Use deterministic container-local origins and generic HTTP clients, with no production credentials or billable API calls. Test the real CLI and local HTTP endpoint, observing standard streams, environment output, exit status, and a controlled managed command's behavior rather than private module internals. The separate smoke harness validates password SSH and direct forwarding only; actual-binary suites cover the assembled contract. See [fixture instructions](tests/docker/README.md) and the [acceptance report](tests/docker/ACCEPTANCE.md). Specific applications, providers, login flows, and token refresh are not release acceptance targets.
 
-## Implementation sequence
+## Completed implementation sequence
 
 1. Authenticate with password, verify host keys, and relay one HTTPS CONNECT request over a real SSH channel in Docker.
 2. Add HTTP forwarding, streamed bodies, limits, environment output, and `up` lifecycle handling.

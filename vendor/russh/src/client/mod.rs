@@ -450,12 +450,10 @@ impl<H: Handler> Handle<H> {
                         partial_success,
                     });
                 }
-                None => {
-                    return Ok(AuthResult::Failure {
-                        remaining_methods: MethodSet::empty(),
-                        partial_success: false,
-                    });
-                }
+                // A closed driver is not a USERAUTH_FAILURE. Preserve the
+                // distinction so callers never retry explicit rejection but
+                // can recover an interrupted authentication exchange.
+                None => return Err(crate::Error::RecvError),
                 _ => {}
             }
         }
@@ -1346,12 +1344,15 @@ impl Session {
         self.receiver.close();
         self.priority_receiver.close();
         self.inbound_channel_receiver.close();
-        map_err!(stream_write.shutdown().await)?;
+        // Preserve a received protocol/authentication disconnect reason even
+        // when closing its TCP write half also fails.
+        let shutdown_result = stream_write.shutdown().await;
         match result {
             Ok(v) => {
                 handler
                     .disconnected(DisconnectReason::ReceivedDisconnect(v))
                     .await?;
+                map_err!(shutdown_result)?;
                 Ok(())
             }
             Err(e) => {

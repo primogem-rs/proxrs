@@ -58,8 +58,20 @@ elif mode == 'descendants':
     os.close(ready_write)
     assert os.read(ready_read, 5) == b'ready'
     os.close(ready_read)
+    if args[1] == 'signal_exit':
+        signal.signal(signal.SIGUSR1, lambda signum, frame: sys.exit(29))
     print(json.dumps({'pid': os.getpid(), 'descendant': child, 'proxy': os.environ['HTTP_PROXY']}), flush=True)
     if args[1] == 'exit':
         sys.exit(17)
     while True:
         time.sleep(1)
+
+elif mode == 'recovery_interactive':
+    signal.signal(signal.SIGINT, lambda signum, frame: print('CHILD_HANDLED_INT_DURING_RETRY', file=sys.stderr, flush=True))
+    print('CHILD_READY ' + json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp(), 'foreground': os.tcgetpgrp(0), 'proxy': os.environ['HTTP_PROXY']}), file=sys.stderr, flush=True)
+    for entered in sys.stdin:
+        if entered.strip() == 'probe':
+            assert https(ca) == 'proxrs-docker-origin\n'
+            print('CHILD_HTTPS_AFTER_RECOVERY', file=sys.stderr, flush=True)
+        elif entered.strip() == 'exit':
+            sys.exit(19)

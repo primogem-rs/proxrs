@@ -21,14 +21,14 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
 pub async fn serve(
     listener: TcpListener,
-    ssh: Arc<Connection>,
+    ssh: watch::Receiver<Option<Arc<Connection>>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let capacity = Arc::new(Semaphore::new(256));
@@ -53,7 +53,7 @@ pub async fn serve(
 
 async fn serve_client(
     stream: TcpStream,
-    ssh: Arc<Connection>,
+    ssh: watch::Receiver<Option<Arc<Connection>>>,
     cancel: CancellationToken,
     permit: OwnedSemaphorePermit,
 ) {
@@ -77,7 +77,15 @@ async fn serve_client(
         let permit = permit.clone();
         async move {
             match heads.lock().await.recv().await {
-                Some(Ok(malformed)) => handle(request, ssh, cancel, permit, malformed).await,
+                Some(Ok(malformed)) => {
+                    let current = ssh.borrow().clone();
+                    match current {
+                        Some(connection) => {
+                            handle(request, connection, cancel, permit, malformed).await
+                        }
+                        None => Ok(response(StatusCode::SERVICE_UNAVAILABLE)),
+                    }
+                }
                 Some(Err(status)) => Ok(response(status)),
                 None => Ok(response(StatusCode::BAD_REQUEST)),
             }

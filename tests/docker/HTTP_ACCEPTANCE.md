@@ -33,7 +33,7 @@ The Rust default tests do not invoke Docker or public services. `scripts/docker-
 - Repeatedly abandoning 140 responses that each declare 1 GiB releases channel capacity. All 128 active channels count toward the channel limit; a pending destination open consumes the same capacity. Excess work gets 503 promptly. All 256 accepted clients, including CONNECT tunnels, count toward the client limit; excess sockets close promptly. Released work restores capacity after channel cleanup.
 - Refused destinations and denied SSH forwarding return 502 without terminating the authenticated SSH session. Their diagnostics distinguish destination connection failure from policy denial, which points to AllowTcpForwarding and PermitOpen.
 
-`proxy_cases.py` additionally verifies the existing CONNECT slice: port boundaries 1 and 65535 are accepted as destinations, malformed ports and IPv6 authorities are rejected, loopback binding is inspected with `lsof`, uppercase/lowercase exports use the actual bound port, concurrent TLS requests progress beside stalled readers and a stalled destination open, and SIGINT/SIGTERM and SSH loss close listeners and tunnels. That suite checks password/host-trust failures and the ten-second authentication deadline too.
+`proxy_cases.py` additionally verifies the existing CONNECT slice: port boundaries 1 and 65535 are accepted as destinations, malformed ports and IPv6 authorities are rejected, loopback binding is inspected with `lsof`, uppercase/lowercase exports use the actual bound port, concurrent TLS requests progress beside stalled readers and a stalled destination open, and SIGINT/SIGTERM close listeners and tunnels. SSH loss closes old tunnels, returns 503 during recovery, and allows fresh requests after reconnection. That suite checks password/host-trust failures and the ten-second authentication deadline per attempt too.
 
 ## Bounds and cancellation
 
@@ -56,4 +56,4 @@ An independent client makes ordinary HTTP requests throughout each transfer, pau
 
 Ubuntu's delta was 1,327,104 bytes (1.27 MiB); Debian's was 3,080,192 bytes (2.94 MiB). Both passed the 64 MiB acceptance threshold while healthy requests continued to complete. These are observed fixture measurements, not an estimate or a throughput promise.
 
-Managed-command environment/PTY behavior and bounded SSH recovery are separate ticket suites. These HTTP results do not establish those remaining v0.1 acceptance criteria or application-specific compatibility.
+These #4 measurements are historical slice evidence. The final assembled build, including managed-command and bounded SSH recovery suites, is recorded in [ACCEPTANCE.md](ACCEPTANCE.md) with new release RSS measurements on both distributions. No suite establishes application-specific compatibility.
