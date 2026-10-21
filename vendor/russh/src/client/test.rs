@@ -92,6 +92,125 @@ mod tests {
         }
     }
 
+    struct PasswordResultServer {
+        disconnect: bool,
+        auth_seen: Arc<tokio::sync::Notify>,
+    }
+
+    impl ServerHandler for PasswordResultServer {
+        type Error = Error;
+
+        async fn auth_password(&mut self, _: &str, _: &str) -> Result<Auth, Error> {
+            self.auth_seen.notify_one();
+            if self.disconnect {
+                Err(Error::Disconnect)
+            } else {
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(crate::MethodSet::empty()),
+                    partial_success: false,
+                })
+            }
+        }
+    }
+
+    struct PasswordResultClient(Arc<tokio::sync::Notify>);
+
+    impl Handler for PasswordResultClient {
+        type Error = Error;
+
+        async fn check_server_key(&mut self, _: &PublicKeyOrCertificate) -> Result<bool, Error> {
+            Ok(true)
+        }
+
+        async fn disconnected(
+            &mut self,
+            _: crate::client::DisconnectReason<Error>,
+        ) -> Result<(), Error> {
+            self.0.notify_one();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn password_auth_distinguishes_rejection_from_transport_loss() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for disconnect in [false, true] {
+            let mut config = server::Config::default();
+            config.auth_rejection_time = std::time::Duration::ZERO;
+            config
+                .keys
+                .push(PrivateKey::random(&mut rng(), ssh_key::Algorithm::Ed25519).unwrap());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let auth_seen = Arc::new(tokio::sync::Notify::new());
+                let session = server::run_stream(
+                    Arc::new(config),
+                    socket,
+                    PasswordResultServer {
+                        disconnect,
+                        auth_seen: auth_seen.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+                auth_seen.notified().await;
+                if !disconnect {
+                    // This queued disconnect follows the explicit failure reply.
+                    session
+                        .handle()
+                        .disconnect(
+                            crate::Disconnect::ByApplication,
+                            "finished".into(),
+                            "".into(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                let _ = session.await;
+            });
+            let closed = Arc::new(tokio::sync::Notify::new());
+            let mut client = connect(
+                Arc::new(Config::default()),
+                addr,
+                PasswordResultClient(closed.clone()),
+            )
+            .await
+            .unwrap();
+            {
+                let result = client.authenticate_password("user", "disposable-test-password");
+                tokio::pin!(result);
+                // Send the public auth request, then wait for the driver to end
+                // before consuming its queued reply. A real rejection must not
+                // become transport loss merely because the driver is closed.
+                poll_fn(|cx| {
+                    assert!(result.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                tokio::time::timeout(std::time::Duration::from_secs(3), closed.notified())
+                    .await
+                    .unwrap();
+                let result = result.await;
+                if disconnect {
+                    assert!(matches!(result, Err(Error::RecvError)));
+                } else {
+                    assert!(matches!(result, Ok(crate::client::AuthResult::Failure {
+                        remaining_methods, partial_success: false,
+                    }) if remaining_methods.is_empty()));
+                }
+            }
+            drop(client);
+            tokio::time::timeout(std::time::Duration::from_secs(3), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn test_client_connects_to_protocol_1_99() {
         let _ = env_logger::try_init();

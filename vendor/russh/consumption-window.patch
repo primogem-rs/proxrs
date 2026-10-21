@@ -453,7 +453,24 @@
  }
  
  impl<H: Handler> Drop for Handle<H> {
-@@ -700,6 +705,7 @@
+@@ -445,12 +450,10 @@
+                         partial_success,
+                     });
+                 }
+-                None => {
+-                    return Ok(AuthResult::Failure {
+-                        remaining_methods: MethodSet::empty(),
+-                        partial_success: false,
+-                    });
+-                }
++                // A closed driver is not a USERAUTH_FAILURE. Preserve the
++                // distinction so callers never retry explicit rejection but
++                // can recover an interrupted authentication exchange.
++                None => return Err(crate::Error::RecvError),
+                 _ => {}
+             }
+         }
+@@ -700,6 +703,7 @@
          &self,
          mut receiver: Receiver<ChannelMsg>,
          window_size_ref: WindowSizeRef,
@@ -461,7 +478,7 @@
      ) -> Result<Channel<Msg>, crate::Error> {
          loop {
              match receiver.recv().await {
-@@ -717,7 +723,7 @@
+@@ -717,7 +721,7 @@
                              max_packet_size,
                              window_size: window_size_ref,
                          },
@@ -470,7 +487,7 @@
                      });
                  }
                  Some(ChannelMsg::OpenFailure(reason)) => {
-@@ -808,7 +814,7 @@
+@@ -808,7 +812,7 @@
              .send(Msg::ChannelOpenSession { channel_ref })
              .await
              .map_err(|_| crate::Error::SendError)?;
@@ -479,7 +496,7 @@
              .await
      }
  
-@@ -830,7 +836,7 @@
+@@ -830,7 +834,7 @@
              })
              .await
              .map_err(|_| crate::Error::SendError)?;
@@ -488,7 +505,7 @@
              .await
      }
  
-@@ -849,8 +855,14 @@
+@@ -849,8 +853,14 @@
          originator_address: B,
          originator_port: u32,
      ) -> Result<Channel<Msg>, crate::Error> {
@@ -505,7 +522,7 @@
          let window_size_ref = channel_ref.window_size().clone();
  
          self.sender
-@@ -863,7 +875,7 @@
+@@ -863,7 +873,7 @@
              })
              .await
              .map_err(|_| crate::Error::SendError)?;
@@ -514,7 +531,7 @@
              .await
      }
  
-@@ -882,7 +894,7 @@
+@@ -882,7 +892,7 @@
              })
              .await
              .map_err(|_| crate::Error::SendError)?;
@@ -523,7 +540,7 @@
              .await
      }
  
-@@ -1193,6 +1205,11 @@
+@@ -1193,6 +1203,11 @@
          );
      }
      let channel_buffer_size = config.channel_buffer_size;
@@ -535,7 +552,7 @@
      let mut session = Session::new(
          config.window_size,
          CommonSession {
-@@ -1214,6 +1231,7 @@
+@@ -1214,6 +1229,7 @@
          session_receiver,
          session_sender,
      );
@@ -543,7 +560,7 @@
      session.begin_rekey()?;
      let (kex_done_signal, kex_done_signal_rx) = oneshot::channel();
      let join = russh_util::runtime::spawn(session.run(stream, handler, Some(kex_done_signal)));
-@@ -1231,6 +1249,8 @@
+@@ -1231,6 +1247,8 @@
          receiver: handle_receiver,
          join,
          channel_buffer_size,
@@ -552,7 +569,7 @@
      })
  }
  
-@@ -1263,6 +1283,21 @@
+@@ -1263,6 +1281,21 @@
                  seqn: buffer.seqn,
              })
          }
@@ -574,7 +591,7 @@
      }
  
      fn new(
-@@ -1284,6 +1319,7 @@
+@@ -1284,6 +1317,7 @@
              inbound_channel_sender,
              inbound_channel_receiver,
              channels: HashMap::new(),
@@ -582,7 +599,24 @@
              pending_reads: Vec::new(),
              pending_len: 0,
              open_global_requests: VecDeque::new(),
-@@ -1366,6 +1402,7 @@
+@@ -1310,12 +1344,15 @@
+         self.receiver.close();
+         self.priority_receiver.close();
+         self.inbound_channel_receiver.close();
+-        map_err!(stream_write.shutdown().await)?;
++        // Preserve a received protocol/authentication disconnect reason even
++        // when closing its TCP write half also fails.
++        let shutdown_result = stream_write.shutdown().await;
+         match result {
+             Ok(v) => {
+                 handler
+                     .disconnected(DisconnectReason::ReceivedDisconnect(v))
+                     .await?;
++                map_err!(shutdown_result)?;
+                 Ok(())
+             }
+             Err(e) => {
+@@ -1366,6 +1403,7 @@
          let reading = start_reading(stream_read, buffer, opening_cipher);
          pin!(reading);
  
@@ -590,7 +624,7 @@
          #[allow(clippy::panic)] // false positive in select! macro
          while !self.common.disconnected {
              self.common.received_data = false;
-@@ -1378,6 +1415,9 @@
+@@ -1378,6 +1416,9 @@
                  crate::future_or_pending(self.rekey_time_remaining(), tokio::time::sleep);
              pin!(rekey_timer);
              tokio::select! {
@@ -600,7 +634,7 @@
                  r = &mut reading => {
                      let (stream_read, mut buffer, mut opening_cipher) = match r {
                          Ok((_, stream_read, buffer, opening_cipher)) => (stream_read, buffer, opening_cipher),
-@@ -2138,6 +2178,70 @@
+@@ -2138,6 +2179,70 @@
          (session, sender, reply_receiver)
      }
  
@@ -671,7 +705,7 @@
      const HOSTKEYS_SESSION_ID: &[u8] = b"hostkeys-session-id";
  
      /// An authenticated session with one outstanding `hostkeys-prove-00` request.
-@@ -2651,6 +2755,11 @@
+@@ -2651,6 +2756,11 @@
      pub maximum_packet_size: u32,
      /// Buffer size for each channel (a number of unprocessed messages to store before propagating backpressure to the TCP stream)
      pub channel_buffer_size: usize,
@@ -683,7 +717,7 @@
      /// Lists of preferred algorithms.
      pub preferred: negotiation::Preferred,
      /// Time after which the connection is garbage-collected.
-@@ -2680,6 +2789,7 @@
+@@ -2680,6 +2790,7 @@
              window_size: 2097152,
              maximum_packet_size: 32768,
              channel_buffer_size: 100,
@@ -712,6 +746,134 @@
          if let Some(ref mut enc) = self.common.encrypted {
              enc.close(channel)
          } else {
+--- a/src/client/test.rs
++++ b/src/client/test.rs
+@@ -89,6 +89,125 @@
+             _: &PublicKeyOrCertificate,
+         ) -> Result<bool, Self::Error> {
+             Ok(true)
++        }
++    }
++
++    struct PasswordResultServer {
++        disconnect: bool,
++        auth_seen: Arc<tokio::sync::Notify>,
++    }
++
++    impl ServerHandler for PasswordResultServer {
++        type Error = Error;
++
++        async fn auth_password(&mut self, _: &str, _: &str) -> Result<Auth, Error> {
++            self.auth_seen.notify_one();
++            if self.disconnect {
++                Err(Error::Disconnect)
++            } else {
++                Ok(Auth::Reject {
++                    proceed_with_methods: Some(crate::MethodSet::empty()),
++                    partial_success: false,
++                })
++            }
++        }
++    }
++
++    struct PasswordResultClient(Arc<tokio::sync::Notify>);
++
++    impl Handler for PasswordResultClient {
++        type Error = Error;
++
++        async fn check_server_key(&mut self, _: &PublicKeyOrCertificate) -> Result<bool, Error> {
++            Ok(true)
++        }
++
++        async fn disconnected(
++            &mut self,
++            _: crate::client::DisconnectReason<Error>,
++        ) -> Result<(), Error> {
++            self.0.notify_one();
++            Ok(())
++        }
++    }
++
++    #[tokio::test]
++    async fn password_auth_distinguishes_rejection_from_transport_loss() {
++        use std::future::{Future, poll_fn};
++        use std::task::Poll;
++
++        for disconnect in [false, true] {
++            let mut config = server::Config::default();
++            config.auth_rejection_time = std::time::Duration::ZERO;
++            config
++                .keys
++                .push(PrivateKey::random(&mut rng(), ssh_key::Algorithm::Ed25519).unwrap());
++            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let addr = listener.local_addr().unwrap();
++            let server = tokio::spawn(async move {
++                let (socket, _) = listener.accept().await.unwrap();
++                let auth_seen = Arc::new(tokio::sync::Notify::new());
++                let session = server::run_stream(
++                    Arc::new(config),
++                    socket,
++                    PasswordResultServer {
++                        disconnect,
++                        auth_seen: auth_seen.clone(),
++                    },
++                )
++                .await
++                .unwrap();
++                auth_seen.notified().await;
++                if !disconnect {
++                    // This queued disconnect follows the explicit failure reply.
++                    session
++                        .handle()
++                        .disconnect(
++                            crate::Disconnect::ByApplication,
++                            "finished".into(),
++                            "".into(),
++                        )
++                        .await
++                        .unwrap();
++                }
++                let _ = session.await;
++            });
++            let closed = Arc::new(tokio::sync::Notify::new());
++            let mut client = connect(
++                Arc::new(Config::default()),
++                addr,
++                PasswordResultClient(closed.clone()),
++            )
++            .await
++            .unwrap();
++            {
++                let result = client.authenticate_password("user", "disposable-test-password");
++                tokio::pin!(result);
++                // Send the public auth request, then wait for the driver to end
++                // before consuming its queued reply. A real rejection must not
++                // become transport loss merely because the driver is closed.
++                poll_fn(|cx| {
++                    assert!(result.as_mut().poll(cx).is_pending());
++                    Poll::Ready(())
++                })
++                .await;
++                tokio::time::timeout(std::time::Duration::from_secs(3), closed.notified())
++                    .await
++                    .unwrap();
++                let result = result.await;
++                if disconnect {
++                    assert!(matches!(result, Err(Error::RecvError)));
++                } else {
++                    assert!(matches!(result, Ok(crate::client::AuthResult::Failure {
++                        remaining_methods, partial_success: false,
++                    }) if remaining_methods.is_empty()));
++                }
++            }
++            drop(client);
++            tokio::time::timeout(std::time::Duration::from_secs(3), server)
++                .await
++                .unwrap()
++                .unwrap();
+         }
+     }
+ 
 --- a/src/server/session.rs
 +++ b/src/server/session.rs
 @@ -1,3 +1,6 @@
