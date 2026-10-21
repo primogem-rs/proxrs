@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real SSH failure injection through a bounded, opaque loopback TCP relay."""
 import argparse
+from proxy_cases import run_suite
 import contextlib
 import http.client
 import json
@@ -619,4 +620,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_suite(main)

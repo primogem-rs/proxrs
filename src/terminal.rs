@@ -144,3 +144,27 @@ pub async fn approve_host(host: &str, port: u16, key_type: &str, fingerprint: &s
     }
     Ok(())
 }
+
+pub fn destination_failure(error: &crate::transport::DestinationError) {
+    eprintln!("{error}");
+}
+
+pub fn ssh_connection_lost() {
+    eprintln!("proxrs: SSH connection lost; interrupted requests remain failed");
+}
+
+pub fn ssh_connection_restored() {
+    eprintln!("proxrs: SSH connection restored; new requests can proceed");
+}
+
+pub fn ssh_retry(attempt: u32, delay: u64) {
+    eprintln!("proxrs: SSH connection unavailable; retry {attempt}/3 in {delay} seconds");
+}
+
+pub fn restoration_failure(error: &io::Error) {
+    eprintln!("proxrs: could not restore terminal: {error}");
+}
+
+pub fn session_failure(error: &anyhow::Error) {
+    eprintln!("proxrs: {error:#}");
+}

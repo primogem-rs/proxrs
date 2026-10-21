@@ -17,7 +17,7 @@ async fn main() {
     match result {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("proxrs: {error:#}");
+            terminal::session_failure(&error);
             std::process::exit(1);
         }
     }

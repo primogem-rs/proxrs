@@ -83,3 +83,33 @@ Ubuntu's delta is 2,850,816 bytes (2.72 MiB); Debian's is 2,752,512 bytes (2.62 
 No known v0.1 acceptance failure remains. The suites generate per-run passwords, host keys, known-hosts files, CA keys, and owned processes/containers; finally blocks remove them after success or failure. They never change developer SSH configuration or reuse unrelated containers. Build images remain cached. Logs are checked for passwords, authorization markers, and request body markers.
 
 Validated client platform is macOS; server fixtures are Ubuntu 24.04 and Debian 12. Ordinary SSH host keys and password authentication are supported. SSH certificates, key/agent/keyboard-interactive authentication, independently running services, detached daemons, Linux/Windows clients, and application-specific compatibility remain outside the agreed v0.1 scope. Best-effort password zeroization does not claim control over all library or operating-system copies.
+
+## Final review regressions
+
+The final two-axis review identified two HTTP authority defects and four standards/maintenance findings. The authority regression was first run against the pre-fix actual binary with fresh controlled origins: overflow, nonnumeric, and empty HTTP ports incorrectly reached port 80, and text after a closing IPv6 bracket was accepted for both HTTP and CONNECT. All five returned 200. The corrected shared validator returns 400 for these forms, keeps CONNECT's explicit-port requirement, defaults only an absent HTTP port to 80, and preserves ordinary HTTP plus certificate-validated CONNECT over valid IPv6.
+
+A separate red regression sent SIGTERM to a fixture-owning harness after its actual proxy completed HTTPS. Its container survived. Shared SIGINT/SIGTERM handling now unwinds suite contexts, ignores repeated termination during that unwind, and restores the previous handlers when done. The green check observes removal of the proxy process, listener, container, and temporary credentials and survival of an unrelated process. A second red regression interrupted startup after the real Docker daemon created a container but before its CLI returned the ID; this also leaked. Shared signal deferral now completes container-ID registration, detached-process registration, and cleanup before delivering termination. Both startup and ready-state interruption cases pass. The regression's own finally block removes only its reported owned resources after a failure, including both deliberate red runs. Diagnostic formatting/emission now resides in the terminal layer; trust verification/enrollment share their known-host identity formatter.
+
+Review validation uses the current macOS binary and fresh Ubuntu 24.04 and Debian 12 fixtures:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build
+python3 tests/docker/cleanup_cases.py --image ubuntu:24.04
+python3 tests/docker/cleanup_cases.py --image debian:12
+python3 tests/docker/http_cases.py --image ubuntu:24.04
+python3 tests/docker/http_cases.py --image debian:12
+python3 tests/docker/trust_cases.py --image ubuntu:24.04
+python3 tests/docker/trust_cases.py --image debian:12
+python3 tests/docker/proxy_cases.py --image ubuntu:24.04
+python3 tests/docker/proxy_cases.py --image debian:12
+python3 tests/docker/run_cases.py --image ubuntu:24.04
+python3 tests/docker/run_cases.py --image debian:12
+bash scripts/docker-ssh-smoke.sh
+```
+
+The existing `startup_transient` and `established_recovery` public cases were also run on both distributions through the same fixture, exercising the relocated retry/loss/restoration diagnostics with real SSH. This review changes authority validation and output ownership, not stream buffering or the retry state machine; the complete assembled recovery and release RSS measurements above remain the relevant earlier evidence.
+
+All listed final-review commands passed on both distributions, along with six default Rust tests and the separate fixture-only smoke. The later ownership guard was rechecked with both startup and ready-state interruption cases on both distributions; no production code changed after the full affected-suite runs.

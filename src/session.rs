@@ -65,14 +65,14 @@ impl SshSession {
             }
             available.send_replace(None);
             self.connection.close();
-            eprintln!("proxrs: SSH connection lost; interrupted requests remain failed");
+            terminal::ssh_connection_lost();
             if !transport::retryable(&failure) {
                 return Err(failure);
             }
             self.connection = retry(options, &mut self.password, &mut self.retries).await?;
             self.ready_since = Instant::now();
             available.send_replace(Some(self.connection.clone()));
-            eprintln!("proxrs: SSH connection restored; new requests can proceed");
+            terminal::ssh_connection_restored();
         }
     }
 }
@@ -85,7 +85,7 @@ async fn retry(
     while *retries < 3 {
         let delay = 1 << *retries;
         *retries += 1;
-        eprintln!("proxrs: SSH connection unavailable; retry {retries}/3 in {delay} seconds");
+        terminal::ssh_retry(*retries, delay);
         tokio::time::sleep(Duration::from_secs(delay)).await;
         match Connection::connect(options, password).await {
             Ok(connection) => return Ok(Arc::new(connection)),

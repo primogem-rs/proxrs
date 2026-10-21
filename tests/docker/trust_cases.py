@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real CLI trust and terminal acceptance, opt-in and isolated per fixture."""
 import argparse
+from proxy_cases import run_suite
 import contextlib
 import fcntl
 import os
@@ -436,4 +437,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_suite(main)

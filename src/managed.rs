@@ -1,4 +1,4 @@
-use crate::cli::RunOptions;
+use crate::{cli::RunOptions, terminal};
 use anyhow::{Context, Result};
 use std::{
     fs::{File, OpenOptions},
@@ -224,7 +224,7 @@ impl Drop for ForegroundTerminal {
             })
         };
         if let Err(error) = restored {
-            eprintln!("proxrs: could not restore terminal: {error}");
+            terminal::restoration_failure(&error);
         }
     }
 }

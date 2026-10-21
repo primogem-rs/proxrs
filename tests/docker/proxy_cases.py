@@ -21,6 +21,45 @@ ROOT = Path(__file__).resolve().parents[2]
 def command(*args, **kwargs):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout
 
+def run_suite(main):
+    """Turn ordinary termination into unwinding of owned fixture contexts."""
+    def terminate(signum, _frame):
+        # A repeated interrupt must not cut short process/container cleanup.
+        for owned_signal in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(owned_signal, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+
+    previous = {number: signal.signal(number, terminate)
+                for number in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        main()
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+@contextlib.contextmanager
+def defer_termination():
+    """Finish ownership registration or cleanup before unwinding on a signal."""
+    pending = []
+    def defer(signum, _frame):
+        if not pending:
+            pending.append(signum)
+
+    previous = {number: signal.signal(number, defer)
+                for number in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        if pending:
+            number = pending[0]
+            handler = previous[number]
+            if callable(handler):
+                handler(number, None)
+            elif handler != signal.SIG_IGN:
+                raise SystemExit(128 + number)
+
 class Fixture:
     def __init__(self, image):
         self.image = image
@@ -37,8 +76,9 @@ class Fixture:
             command("docker", "build", "--iidfile", str(image_id), "--build-arg", "BASE_IMAGE=" + self.image,
                     "--tag", tag, str(ROOT / "tests/docker"))
             built_image = image_id.read_text().strip()
-            self.container = command("docker", "run", "--detach", "--rm", "--label", "dev.proxrs.fixture=cli",
-                                     "--publish", "127.0.0.1::22", "--add-host", "origin.proxrs.test:127.0.0.1", built_image).decode().strip()
+            with defer_termination():
+                self.container = command("docker", "run", "--detach", "--rm", "--label", "dev.proxrs.fixture=cli",
+                                         "--publish", "127.0.0.1::22", "--add-host", "origin.proxrs.test:127.0.0.1", built_image).decode().strip()
             self.port = int(command("docker", "port", self.container, "22/tcp").decode().strip().rsplit(":", 1)[1])
             self.docker("chpasswd", input=("proxrs:" + self.password + "\n").encode())
             for _ in range(100):
@@ -67,8 +107,9 @@ class Fixture:
         number = len(self.processes)
         out = open(self.path / f"stdout-{number}", "w+")
         err = open(self.path / f"stderr-{number}", "w+")
-        process = subprocess.Popen(args or self.args(), stdin=subprocess.PIPE, stdout=out, stderr=err, start_new_session=True)
-        self.processes.append((process, out, err))
+        with defer_termination():
+            process = subprocess.Popen(args or self.args(), stdin=subprocess.PIPE, stdout=out, stderr=err, start_new_session=True)
+            self.processes.append((process, out, err))
         process.stdin.write(((password if password is not None else self.password) + "\r\n").encode())
         process.stdin.close()
         return process, out, err
@@ -116,6 +157,7 @@ class Fixture:
                     response += data
                 assert response.endswith(b"proxrs-docker-origin\n"), response
 
+    @defer_termination()
     def __exit__(self, *args):
         failures = []
         try:
@@ -390,4 +432,4 @@ def main():
         ssh_loss_case(fixture)
 
 if __name__ == "__main__":
-    main()
+    run_suite(main)
