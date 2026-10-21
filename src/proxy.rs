@@ -1,5 +1,5 @@
-use crate::http_ingress;
 use crate::transport::{Connection, DestinationError};
+use crate::{http_ingress, terminal};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{
@@ -124,26 +124,12 @@ async fn handle(
     let Some(authority) = request.uri().authority() else {
         return Ok(response(StatusCode::BAD_REQUEST));
     };
-    if request.uri().scheme().is_some()
-        || request.uri().path_and_query().is_some()
-        || authority.as_str().contains('@')
-    {
+    if request.uri().scheme().is_some() || request.uri().path_and_query().is_some() {
         return Ok(response(StatusCode::BAD_REQUEST));
     }
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let Some(port) = authority.port_u16().filter(|port| *port != 0) else {
+    let Some((host, port)) = destination_authority(authority, None) else {
         return Ok(response(StatusCode::BAD_REQUEST));
     };
-    if host.is_empty()
-        || ((host.contains(':') || authority.as_str().starts_with('['))
-            && (!authority.as_str().starts_with('[')
-                || host.parse::<std::net::Ipv6Addr>().is_err()))
-    {
-        return Ok(response(StatusCode::BAD_REQUEST));
-    }
     let mut channel = match ssh.open(host.to_owned(), port).await {
         Ok(channel) => channel,
         Err(error) => {
@@ -165,8 +151,49 @@ async fn handle(
     });
     Ok(response(StatusCode::OK))
 }
+// The HTTP library parses general URI authorities. A proxy destination has a
+// stricter shape: an optional bracketed IPv6 literal and an actual TCP port.
+// Inspect the complete text because Authority::host() discards text after ']'
+// and Authority::port() treats invalid explicit ports as absent.
+fn destination_authority(
+    authority: &hyper::http::uri::Authority,
+    default_port: Option<u16>,
+) -> Option<(&str, u16)> {
+    let text = authority.as_str();
+    if text.contains('@') {
+        return None;
+    }
+    let (host, port) = if let Some(bracketed) = text.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']')?;
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':')?)
+        };
+        (host, port)
+    } else {
+        if text.contains(['[', ']']) {
+            return None;
+        }
+        text.split_once(':')
+            .map_or((text, None), |(host, port)| (host, Some(port)))
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        Some(port) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
+            port.parse::<u16>().ok().filter(|port| *port != 0)?
+        }
+        Some(_) => return None,
+        None => default_port?,
+    };
+    Some((host, port))
+}
+
 fn destination_error(error: DestinationError) -> Response<ProxyBody> {
-    eprintln!("{error}");
+    terminal::destination_failure(&error);
     response(match error {
         DestinationError::Unavailable | DestinationError::Capacity => {
             StatusCode::SERVICE_UNAVAILABLE
@@ -260,21 +287,9 @@ async fn forward(
     let Some(authority) = request.uri().authority().cloned() else {
         return response(StatusCode::BAD_REQUEST);
     };
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let port = authority.port_u16().unwrap_or(80);
-    if host.is_empty()
-        || authority.as_str().contains('@')
-        || port == 0
-        || (authority.port().is_some() && authority.port_u16().is_none())
-        || ((host.contains(':') || authority.as_str().starts_with('['))
-            && (!authority.as_str().starts_with('[')
-                || host.parse::<std::net::Ipv6Addr>().is_err()))
-    {
+    let Some((host, port)) = destination_authority(&authority, Some(80)) else {
         return response(StatusCode::BAD_REQUEST);
-    }
+    };
     let channel = match ssh.open(host.to_owned(), port).await {
         Ok(channel) => channel,
         Err(error) => {

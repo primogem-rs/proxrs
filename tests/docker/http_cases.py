@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Public HTTP proxy protocol and streaming cases against real Docker SSH."""
 import argparse
+from proxy_cases import run_suite
 from contextlib import closing, ExitStack
 import http.client
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,32 @@ def status(fixture, data):
         stream.sendall(data)
         response = stream.recv(4096)
         return int(response.split(b' ', 2)[1]) if response else None
+
+
+def authority_validation(fixture):
+    malformed = [
+        b'GET http://origin.proxrs.test:65536/ HTTP/1.1\r\nHost: x\r\n\r\n',
+        b'GET http://origin.proxrs.test:abc/ HTTP/1.1\r\nHost: x\r\n\r\n',
+        b'GET http://origin.proxrs.test:/ HTTP/1.1\r\nHost: x\r\n\r\n',
+        b'GET http://[::1]garbage:8080/ HTTP/1.1\r\nHost: x\r\n\r\n',
+        b'CONNECT [::1]garbage:8443 HTTP/1.1\r\nHost: x\r\n\r\n',
+        b'CONNECT [::1]: HTTP/1.1\r\nHost: x\r\n\r\n',
+        b'CONNECT [::1] HTTP/1.1\r\nHost: x\r\n\r\n',
+    ]
+    observed = [status(fixture, request) for request in malformed]
+    assert observed == [400] * len(malformed), observed
+    with closing(connection(fixture)) as client:
+        client.request('GET', 'http://origin.proxrs.test/')
+        response = client.getresponse()
+        assert response.status == 200, response.status
+        assert response.read() == b'proxrs-docker-origin\n'
+    with closing(connection(fixture)) as client:
+        client.request('GET', 'http://[::1]:8080/')
+        response = client.getresponse()
+        assert response.status == 200, response.status
+        assert response.read() == b'proxrs-docker-origin\n'
+    fixture.https('[::1]:8443')
+    print('PASS: malformed ports and complete IPv6 authorities return 400; absent HTTP port uses 80 and valid IPv6 forwards')
 
 
 def framing(fixture):
@@ -321,6 +348,7 @@ def main():
     with Fixture(args.image) as fixture:
         fixture.ready()
         forwarding(fixture)
+        authority_validation(fixture)
         framing(fixture)
         routing_and_headers(fixture)
         streaming(fixture)
@@ -342,4 +370,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_suite(main)

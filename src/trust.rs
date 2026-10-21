@@ -25,11 +25,7 @@ pub fn verify(path: &Path, host: &str, port: u16, key: &[u8]) -> Result<bool> {
     validate_hash_lengths(&normalized)?;
     let server_key =
         PublicKey::from_bytes(key).context("unsupported SSH host key or certificate")?;
-    let name = if port == 22 {
-        host.to_ascii_lowercase()
-    } else {
-        format!("[{}]:{port}", host.to_ascii_lowercase())
-    };
+    let name = host_identity(host, port);
     let mut applicable = false;
     let mut matched = false;
     for entry in KnownHosts::new(&normalized) {
@@ -129,14 +125,18 @@ pub fn save(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<()> {
     if !contents.is_empty() && !contents.ends_with('\n') {
         writeln!(file)?;
     }
-    let name = if port == 22 {
-        host.to_ascii_lowercase()
-    } else {
-        format!("[{}]:{port}", host.to_ascii_lowercase())
-    };
+    let name = host_identity(host, port);
     writeln!(file, "{name} {}", key.to_openssh()?)
         .context("could not save approved SSH host key")?;
     file.flush().context("could not save approved SSH host key")
+}
+
+fn host_identity(host: &str, port: u16) -> String {
+    if port == 22 {
+        host.to_ascii_lowercase()
+    } else {
+        format!("[{}]:{port}", host.to_ascii_lowercase())
+    }
 }
 
 fn match_patterns(patterns: &[String], name: &str) -> Result<bool> {

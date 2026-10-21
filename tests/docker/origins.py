@@ -195,7 +195,9 @@ servers = [http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Origin),
            IPv6Server(("::1", 8443), Origin),
            socketserver.ThreadingTCPServer(("127.0.0.1", 9000), Echo),
            socketserver.ThreadingTCPServer(("127.0.0.1", 9002), Flood),
-           http.server.ThreadingHTTPServer(("127.0.0.1", 8081), Origin)]
+           http.server.ThreadingHTTPServer(("127.0.0.1", 8081), Origin),
+           http.server.ThreadingHTTPServer(("127.0.0.1", 80), Origin),
+           IPv6Server(("::1", 8080), Origin)]
 for server in servers[1:3]:
     server.socket = context.wrap_socket(server.socket, server_side=True)
 for server in servers:

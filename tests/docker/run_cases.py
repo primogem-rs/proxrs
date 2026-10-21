@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in managed-command acceptance through the real binary and a real PTY."""
 import argparse
+from proxy_cases import run_suite
 import json
 import os
 import re
@@ -260,4 +261,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_suite(main)

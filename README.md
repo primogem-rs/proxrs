@@ -62,6 +62,8 @@ python3 tests/docker/run_cases.py --image ubuntu:24.04
 python3 tests/docker/run_cases.py --image debian:12
 python3 tests/docker/http_cases.py --image ubuntu:24.04
 python3 tests/docker/http_cases.py --image debian:12
+python3 tests/docker/cleanup_cases.py --image ubuntu:24.04
+python3 tests/docker/cleanup_cases.py --image debian:12
 python3 tests/docker/recovery_cases.py --image ubuntu:24.04
 python3 tests/docker/recovery_cases.py --image debian:12
 cargo build --release

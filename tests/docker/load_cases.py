@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Release RSS workload:16 concurrent slow readers,16MiB vs1GiB aggregate."""
 import argparse
+from proxy_cases import run_suite
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
@@ -78,4 +79,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_suite(main)
