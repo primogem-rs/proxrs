@@ -12,6 +12,10 @@ _Avoid_: Proxy server (when referring to the SSH server), node
 The endpoint on the user's computer through which applications send proxied requests.
 _Avoid_: Remote proxy, VPN
 
+**Client connection**:
+One connection from an application to the local proxy, carrying HTTP requests or becoming a CONNECT tunnel. A proxy session can contain many client connections, each lasting through any resulting tunnel.
+_Avoid_: Proxy session (for a single client connection), SSH connection
+
 **Proxy exclusion**:
 A destination rule that tells an application to connect directly instead of using the local proxy.
 _Avoid_: Exception (without specifying what is bypassed)

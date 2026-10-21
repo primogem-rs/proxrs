@@ -10,17 +10,19 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    net::tcp::OwnedReadHalf,
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+        BufReader,
+    },
     sync::mpsc,
 };
 
-pub const HEADER_LIMIT: usize = 32 * 1024;
-pub const HEADER_COUNT: usize = HEADER_LIMIT / 4;
+pub(super) const HEADER_LIMIT: usize = 32 * 1024;
+pub(super) const HEADER_COUNT: usize = HEADER_LIMIT / 4;
 const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 
-pub async fn relay(
-    socket: OwnedReadHalf,
+pub(super) async fn relay(
+    socket: impl AsyncRead + Unpin,
     mut output: impl AsyncWrite + Unpin,
     heads: mpsc::Sender<Result<Arc<AtomicBool>, StatusCode>>,
 ) -> io::Result<()> {

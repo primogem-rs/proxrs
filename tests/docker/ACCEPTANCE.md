@@ -113,3 +113,54 @@ bash scripts/docker-ssh-smoke.sh
 The existing `startup_transient` and `established_recovery` public cases were also run on both distributions through the same fixture, exercising the relocated retry/loss/restoration diagnostics with real SSH. This review changes authority validation and output ownership, not stream buffering or the retry state machine; the complete assembled recovery and release RSS measurements above remain the relevant earlier evidence.
 
 All listed final-review commands passed on both distributions, along with six default Rust tests and the separate fixture-only smoke. The later ownership guard was rechecked with both startup and ready-state interruption cases on both distributions; no production code changed after the full affected-suite runs.
+
+## ADR-0002 client-connection ownership (2026-10-21)
+
+The shared client-connection runner now owns preflight, Hyper, destination
+drivers, and CONNECT relays through completion. Sixteen deterministic byte-stream
+tests cover selection before validation, pinned opens across SSH replacement,
+no replay, error ordering, header deadlines, streaming/backpressure, cancellation,
+and both half-close directions. Dropping the runner closes local streams without
+another scheduler turn; SSH channel-close cleanup retains its transport owner.
+
+The two-axis review found no Standards findings. Its Spec finding exposed
+destination-first CONNECT EOF ending the runner before client bytes finished.
+The regression failed against the earlier executable over real SSH; the fix
+retains the runner and client-capacity permit until both directions complete.
+Follow-up review found no remaining Spec findings.
+
+Final validation:
+
+```sh
+bash scripts/check.sh
+python3 scripts/acceptance.py --suites smoke http proxy trust run recovery cleanup load --output target/acceptance/adr0002-final-20261021
+```
+
+Formatting, strict Clippy, all 22 Rust tests (16 byte-stream and six CLI), and
+six tooling tests passed. The unchanged vendored russh unused-constant warning
+remains outside proxrs's strict Clippy checks.
+
+- **Fixture:** OpenSSH smoke passed separately on Ubuntu 24.04 and Debian 12.
+- **proxrs:** all seven actual-binary suites passed on both distributions: HTTP,
+  proxy/CONNECT, trust, managed commands, recovery, harness cleanup, and release
+  load. This includes the new destination-first half-close regression, no replay
+  of a counted POST, quiet tunnels, client/channel capacity recovery, and cleanup
+  after interrupted fixture startup and active traffic.
+- **Unverified:** no required acceptance case for this refactor remains
+  unverified. Deferred platforms and features retain the scope stated above.
+
+The release workload remains 16 concurrent streams, 16 KiB reads, and 1 ms
+reader pauses, comparing 16 MiB with 1 GiB aggregate transfer:
+
+| SSH fixture | Small peak RSS bytes | Large peak RSS bytes | Delta bytes | Healthy requests, small / large |
+| --- | ---: | ---: | ---: | ---: |
+| Ubuntu 24.04 | 11,616,256 | 13,959,168 | 2,342,912 | 2 / 89 |
+| Debian 12 | 11,304,960 | 14,729,216 | 3,424,256 | 20 / 106 |
+
+Both deltas pass the 67,108,864-byte limit. The local provenance report at
+`target/acceptance/adr0002-final-20261021/manifest.json` records 18 passing steps,
+binary/source hashes, logs, and removal of all 18 created containers. The source
+snapshot was the staged implementation based on `223f659`; only this results
+appendix was added afterward. No production or fixture code changed after the
+passing run. Generated reports and executable snapshots remain under ignored
+`target/acceptance/`.

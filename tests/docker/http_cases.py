@@ -255,7 +255,25 @@ def connect_transitions(fixture):
         while part := stream.recv(4096):
             data += part
         assert data == b'coalesced-dataafter-half-close', data
-    print('PASS: failed CONNECT closes and successful CONNECT preserves coalesced bytes/half-close')
+    with fixture.connect('origin.proxrs.test:9003') as stream:
+        data = b''
+        while part := stream.recv(4096):
+            data += part
+        assert data == b'destination-eof', data
+        stream.sendall(b'client-after-eof')
+        stream.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + 3
+        while True:
+            with closing(connection(fixture)) as probe:
+                probe.request('GET', 'http://origin.proxrs.test:8080/half-closed')
+                response = probe.getresponse()
+                assert response.status == 200
+                observed = response.read()
+            if observed == b'client-after-eof':
+                break
+            assert time.monotonic() < deadline, ('destination-first EOF cut off client bytes', observed)
+            time.sleep(.01)
+    print('PASS: failed CONNECT closes; success preserves coalesced bytes and both half-close directions')
 
 
 def echo_after_cleanup(fixture):

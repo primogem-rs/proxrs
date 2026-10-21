@@ -13,11 +13,21 @@ import threading
 uploaded = [0]
 counted = [0]
 counted_lock = threading.Lock()
+half_closed = [b'']
+half_closed_lock = threading.Lock()
 
 class Origin(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
     def do_GET(self):
+        if self.path == '/half-closed':
+            with half_closed_lock:
+                body = half_closed[0]
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == '/counted':
             with counted_lock:
                 body = str(counted[0]).encode()
@@ -168,6 +178,21 @@ class Echo(socketserver.BaseRequestHandler):
             self.request.sendall(data)
         self.request.sendall(b"after-half-close")
 
+class HalfClose(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.settimeout(5)
+        self.request.sendall(b'destination-eof')
+        self.request.shutdown(socket.SHUT_WR)
+        body = b''
+        while len(body) < 128:
+            part = self.request.recv(128 - len(body))
+            if not part:
+                break
+            body += part
+        with half_closed_lock:
+            half_closed[0] = body
+
+
 class Flood(socketserver.BaseRequestHandler):
     def handle(self):
         self.request.recv(1)
@@ -195,6 +220,7 @@ servers = [http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Origin),
            IPv6Server(("::1", 8443), Origin),
            socketserver.ThreadingTCPServer(("127.0.0.1", 9000), Echo),
            socketserver.ThreadingTCPServer(("127.0.0.1", 9002), Flood),
+           socketserver.ThreadingTCPServer(("127.0.0.1", 9003), HalfClose),
            http.server.ThreadingHTTPServer(("127.0.0.1", 8081), Origin),
            http.server.ThreadingHTTPServer(("127.0.0.1", 80), Origin),
            IPv6Server(("::1", 8080), Origin)]

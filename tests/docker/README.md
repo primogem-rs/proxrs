@@ -16,6 +16,13 @@ Requires macOS, Rust/Cargo, Python 3.9+, Docker CLI with a running local engine,
 OpenSSH, OpenSSL, and standard macOS utilities including `lsof`. Run the separate
 Docker-independent baseline with `bash scripts/check.sh` before acceptance.
 
+The default Rust suite exercises the production client-connection runner over
+bounded in-memory byte streams with scripted destination opens and paused time.
+It covers HTTP/CONNECT ordering, connection selection across replacement,
+streaming/backpressure, header deadlines, and cancellation through tunnel and
+response completion. These tests do not establish real SSH forwarding or channel
+cleanup; the Docker suites below remain required for those behaviors.
+
 By default, the runner builds debug and release with `--locked`, then runs
 `smoke`, `proxy`, `trust`, `http`, `run`, `recovery`, `cleanup`, and `load` in order
 on both `ubuntu:24.04` and `debian:12`. `--suites` and `--images` select a subset;
