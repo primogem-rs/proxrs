@@ -2,12 +2,41 @@
 
 A Rust CLI that exposes a loopback HTTP proxy through password-authenticated SSH. The SSH server opens destination connections and resolves their names; no proxy software, sudo, or server configuration changes are required.
 
+## Installation
+
+Build and install a release executable on macOS:
+
+```sh
+cargo build --release
+./target/release/proxrs install
+```
+
+This copies the invoked executable to `~/.local/bin/proxrs`, creating the directory
+if needed. The installed copy survives `cargo clean` or deleting the checkout.
+Use `--bin-dir /chosen/bin` to select another directory. Both release and debug
+builds can install themselves; installation never builds or downloads a binary.
+
+If the command is not yet selected by PATH, installation prints a setup command
+for the shell indicated by `$SHELL` (`sh`, `bash`, `zsh`, or `fish`). Run it in
+your terminal, and add the same command to your shell's startup configuration for
+future terminals. Status and prompts go to stderr; the setup command goes to
+stdout. Proxrs never edits shell configuration. If shell detection is unavailable
+or unsupported, it reports the directory to add without guessing shell syntax.
+
+Existing destinations always prompt before replacement, even for identical
+binaries. The default is No; declining leaves the existing file untouched.
+For noninteractive replacement or to skip the prompt:
+
+```sh
+./target/release/proxrs install --force
+```
+
 ## Current workflow
 
 Start the proxy from a terminal on macOS with an ordinary Ubuntu or Debian SSH server:
 
 ```sh
-cargo run -- up --host server.example --user alice
+proxrs up --host server.example --user alice
 ```
 
 For an unknown host, inspect the host, port, key type, and SHA-256 fingerprint before typing `yes`. Approval appends the key to `~/.ssh/known_hosts` by default; `--known-hosts PATH` selects another file. The password prompt reads from the controlling terminal with echo disabled. Prompt time does not consume the shared 10-second SSH network and authentication deadline.
@@ -15,7 +44,7 @@ For an unknown host, inspect the host, port, key type, and SHA-256 fingerprint b
 For automation, establish host trust first and supply the password through stdin:
 
 ```sh
-secret-provider read ssh-password | cargo run -- up \
+secret-provider read ssh-password | proxrs up \
   --host server.example --user alice --password-stdin \
   --known-hosts /path/to/trusted_known_hosts
 ```
@@ -35,8 +64,8 @@ During recovery, interrupted HTTP requests and tunnels fail, the same listener r
 Launch a foreground command with arguments after `--`:
 
 ```sh
-cargo run -- run --host server.example --user alice -- curl https://example.com
-secret-provider read ssh-password | cargo run -- run \
+proxrs run --host server.example --user alice -- curl https://example.com
+secret-provider read ssh-password | proxrs run \
   --host server.example --user alice --password-stdin -- your-command --your-option
 ```
 

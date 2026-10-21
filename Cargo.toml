@@ -16,7 +16,9 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 libc = "0.2.191"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa"] }
 sha1 = "0.11.0"
+shell-quote = { version = "0.8", default-features = false, features = ["sh", "bash", "fish"] }
 ssh-key = "0.7.0-rc.11"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.0", features = ["full"] }
 tokio-util = "0.7.20"

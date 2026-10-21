@@ -13,10 +13,22 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Copy this executable into a user bin directory and show any PATH setup.
+    Install(InstallOptions),
     /// Keep a local proxy running; use the printed exports in a second shell.
     Up(ConnectionOptions),
     /// Run a foreground command with the proxy environment and own its lifetime.
     Run(RunOptions),
+}
+
+#[derive(Args)]
+pub struct InstallOptions {
+    /// Install into this directory instead of ~/.local/bin.
+    #[arg(long, value_name = "DIRECTORY")]
+    pub bin_dir: Option<PathBuf>,
+    /// Replace an existing executable without prompting.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
