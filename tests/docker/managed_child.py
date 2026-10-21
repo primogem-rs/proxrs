@@ -9,10 +9,14 @@ import time
 import ssl
 import sys
 from urllib.parse import urlsplit
+from proxy_session import register_managed_group
+
+register_managed_group()
 
 
 def https(ca):
     proxy = urlsplit(os.environ['HTTPS_PROXY'])
+    assert proxy.hostname is not None
     client = http.client.HTTPSConnection(proxy.hostname, proxy.port, context=ssl.create_default_context(cafile=ca), timeout=8)
     client.set_tunnel('origin.proxrs.test', 8443)
     client.request('GET', '/')

@@ -179,6 +179,26 @@ Coverage includes startup and established recovery, 1/2/4 delays, four ten-secon
 
 ## Harness interruption cleanup
 
+Every Python proxrs launch uses `ProxySession` in `proxy_session.py`, including
+the waiting foreground helper. Enter the owner before waiting for exports or a
+managed-command marker. Pipe captures, PTY interaction, observed proxy addresses,
+exit status, and per-child `wait4` usage belong to that invocation; the fixture
+owns only its SSH container and credentials. Cases pass the session explicitly
+to request helpers and assert product cleanup before leaving its context.
+
+Controlled managed commands publish their process group to the session's private
+ownership directory before doing work. Emergency cleanup also covers failures
+before their readiness marker. Owners defer ordinary interruption across
+acquisition and cleanup, use bounded termination waits, attempt all resources,
+and retain both cleanup errors and the original case failure. Captured output
+and cached status/usage remain readable after cleanup.
+
+Docker-independent ownership/cancellation regressions run in the baseline:
+
+```sh
+python3 -m unittest discover -s tests/tooling -p test_proxy_session.py -v
+```
+
 ```sh
 cargo build
 python3 tests/docker/cleanup_cases.py --image ubuntu:24.04

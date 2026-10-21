@@ -3,139 +3,26 @@
 import argparse
 from proxy_cases import run_suite
 import contextlib
-import fcntl
 import os
-import pty
-import re
-import select
 import shlex
 import signal
+import sys
 import termios
 import time
 
-from proxy_cases import Fixture, command, expect_startup_failure
-
-
-class TerminalProcess:
-    def __init__(self, fixture, args=None, password_pipe=False):
-        self.fixture = fixture
-        self.output = bytearray()
-        self.status = None
-        self.out = open(fixture.path / f"pty-output-{time.monotonic_ns()}", "w+")
-        self.master, slave = pty.openpty()
-        self.before = termios.tcgetattr(slave)
-        read_pipe, write_pipe = os.pipe() if password_pipe else (None, None)
-        self.pid = os.fork()
-        if self.pid == 0:
-            os.setsid()
-            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-            os.dup2(read_pipe if password_pipe else slave, 0)
-            os.dup2(self.out.fileno(), 1)
-            os.dup2(slave, 2)
-            os.close(self.master)
-            if password_pipe:
-                os.close(write_pipe)
-                os.close(read_pipe)
-            if slave > 2:
-                os.close(slave)
-            os.execv((args or fixture.args())[0], args or fixture.args())
-        os.close(slave)
-        if password_pipe:
-            os.close(read_pipe)
-            os.write(write_pipe, (fixture.password + "\n").encode())
-            os.close(write_pipe)
-
-    def read(self, timeout=.05):
-        if select.select([self.master], [], [], timeout)[0]:
-            try:
-                self.output.extend(os.read(self.master, 65536))
-            except OSError:
-                pass
-        assert self.fixture.password.encode() not in self.output, "password appeared on terminal"
-        return self.output.decode(errors="replace")
-
-    def wait_text(self, text, timeout=15):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            output = self.read()
-            if text in output:
-                return output
-            if self.poll() is not None:
-                raise AssertionError("process exited before prompt: " + output)
-        raise AssertionError("missing prompt: " + text + ": " + self.read(0))
-
-    def send(self, text):
-        os.write(self.master, text.encode())
-
-    def poll(self):
-        if self.status is None:
-            pid, status = os.waitpid(self.pid, os.WNOHANG)
-            if pid:
-                self.status = os.waitstatus_to_exitcode(status)
-        return self.status
-
-    def wait(self, timeout=5):
-        end = time.monotonic() + timeout
-        while self.poll() is None:
-            self.read()
-            if time.monotonic() >= end:
-                raise AssertionError("terminal process did not exit: " + self.read(0))
-        self.read(0)
-        return self.status
-
-    def ready(self, timeout=15):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            self.out.seek(0)
-            output = self.out.read()
-            self.read(0)
-            assert self.fixture.password not in output
-            match = re.search(r"export HTTP_PROXY='http://127.0.0.1:(\d+)'", output)
-            if match and "export no_proxy=" in output:
-                self.fixture.proxy_port = int(match[1])
-                return
-            if self.poll() is not None:
-                raise AssertionError("process exited before readiness: " + self.read(0))
-            time.sleep(.03)
-        raise AssertionError("terminal process was not ready: " + self.read(0))
-
-    def restored(self):
-        assert termios.tcgetattr(self.master) == self.before, "terminal settings were not restored"
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        try:
-            # The PTY helper owns this fresh session/process group, including
-            # the waiting shell used to verify hand-back of terminal input.
-            try:
-                os.killpg(self.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            if self.poll() is None:
-                try:
-                    self.wait()
-                except BaseException:
-                    os.killpg(self.pid, signal.SIGKILL)
-                    os.waitpid(self.pid, 0)
-                    raise
-            self.read(0)
-        finally:
-            os.close(self.master)
-            self.out.close()
+from proxy_cases import Fixture, ROOT, command, expect_startup_failure
 
 
 def hidden_password(fixture):
     args = fixture.args()
     args.remove("--password-stdin")
-    with TerminalProcess(fixture, args) as process:
+    with fixture.terminal(args) as process:
         process.wait_text("SSH password:")
         assert not termios.tcgetattr(process.master)[3] & (termios.ECHO | termios.ECHONL)
         process.send(fixture.password + "\n")
         process.ready()
         process.restored()
-        fixture.https()
+        fixture.https(process)
         os.kill(process.pid, signal.SIGTERM)
         assert process.wait() == 0
         process.restored()
@@ -147,7 +34,7 @@ def enrollment(fixture):
     preserved = f"unrelated.example {fixture.key}\n# unrelated trust is preserved without a trailing newline"
     store.write_text(preserved)
     args = fixture.args(store)
-    with TerminalProcess(fixture, args, password_pipe=True) as process:
+    with fixture.terminal(args, password_pipe=True) as process:
         output = process.wait_text("Trust this key and save it? [yes/NO]")
         key_file = fixture.path / "public-key"
         key_file.write_text(fixture.key + "\n")
@@ -157,18 +44,18 @@ def enrollment(fixture):
         assert not store.read_text().endswith("\n")
         process.send("yes\n")
         process.ready()
-        fixture.https()
+        fixture.https(process)
         os.kill(process.pid, signal.SIGTERM)
         assert process.wait() == 0
         process.restored()
     contents = store.read_text()
     assert contents.startswith(preserved + "\n")
     assert f"[127.0.0.1]:{fixture.port} " in contents
-    process = fixture.ready(args)
-    fixture.https()
-    process.terminate()
-    assert process.wait(timeout=5) == 0
-    print("PASS: fingerprint approval through terminal, piped password, preserved storage, trust reuse")
+    with fixture.ready(args) as process:
+        fixture.https(process)
+        process.terminate()
+        assert process.wait(timeout=5) == 0
+        print("PASS: fingerprint approval through terminal, piped password, preserved storage, trust reuse")
 
 
 def hashed_trust(fixture):
@@ -176,31 +63,31 @@ def hashed_trust(fixture):
     store.write_text((fixture.path / "known_hosts").read_text())
     command("ssh-keygen", "-q", "-H", "-f", str(store))
     assert store.read_text().startswith("|1|")
-    process = fixture.ready(fixture.args(store))
-    fixture.https()
-    process.terminate()
-    assert process.wait(timeout=5) == 0
-    print("PASS: OpenSSH-generated hashed nondefault-port host trust")
+    with fixture.ready(fixture.args(store)) as process:
+        fixture.https(process)
+        process.terminate()
+        assert process.wait(timeout=5) == 0
+        print("PASS: OpenSSH-generated hashed nondefault-port host trust")
 
 
 def patterned_trust(fixture):
     store = fixture.path / "pattern_hosts"
     store.write_text(f"!unrelated,?[127.0.0.1]:*,[127.0.0.?]:* {fixture.key}\n")
-    process = fixture.ready(fixture.args(store))
-    fixture.https()
-    process.terminate()
-    assert process.wait(timeout=5) == 0
-    print("PASS: ordinary wildcard, question-mark, and negative host patterns")
+    with fixture.ready(fixture.args(store)) as process:
+        fixture.https(process)
+        process.terminate()
+        assert process.wait(timeout=5) == 0
+        print("PASS: ordinary wildcard, question-mark, and negative host patterns")
 
 
 def whitespace_trust(fixture):
     store = fixture.path / "spaced_hosts"
     store.write_text(f"  # comment before a normal tab-separated entry\n\t[127.0.0.1]:{fixture.port}\t  {fixture.key}\n")
-    process = fixture.ready(fixture.args(store))
-    fixture.https()
-    process.terminate()
-    assert process.wait(timeout=5) == 0
-    print("PASS: ordinary known-host whitespace and comments")
+    with fixture.ready(fixture.args(store)) as process:
+        fixture.https(process)
+        process.terminate()
+        assert process.wait(timeout=5) == 0
+        print("PASS: ordinary known-host whitespace and comments")
 
 
 def certificate_only_server(fixture):
@@ -252,10 +139,10 @@ def trust_matrix(fixture):
     ]
     for content in allowed:
         store.write_text(content)
-        process = fixture.ready(fixture.args(store))
-        fixture.https()
-        process.terminate()
-        assert process.wait(timeout=5) == 0
+        with fixture.ready(fixture.args(store)) as process:
+            fixture.https(process)
+            process.terminate()
+            assert process.wait(timeout=5) == 0
     rejected = [
         (original + "@revoked " + original, "host key is revoked"),
         ("@revoked " + original + original, "host key is revoked"),
@@ -293,7 +180,7 @@ def refusal_and_persistence(fixture):
     for reply in ("\n", "no\n"):
         store = fixture.path / f"refused-{len(reply)}"
         before = authentication_count(fixture)
-        with TerminalProcess(fixture, fixture.args(store), password_pipe=True) as process:
+        with fixture.terminal(fixture.args(store), password_pipe=True) as process:
             process.wait_text("Trust this key and save it? [yes/NO]")
             process.send(reply)
             assert process.wait() != 0
@@ -306,7 +193,7 @@ def refusal_and_persistence(fixture):
     store.chmod(0o400)
     before = authentication_count(fixture)
     try:
-        with TerminalProcess(fixture, fixture.args(store), password_pipe=True) as process:
+        with fixture.terminal(fixture.args(store), password_pipe=True) as process:
             process.wait_text("Trust this key and save it? [yes/NO]")
             process.send("yes\n")
             assert process.wait() != 0
@@ -335,7 +222,7 @@ def terminal_cancellation(fixture):
             if prompt == "password":
                 args.remove("--password-stdin")
             before = authentication_count(fixture)
-            with TerminalProcess(fixture, args, password_pipe=prompt == "approval") as process:
+            with fixture.terminal(args, password_pipe=prompt == "approval") as process:
                 process.wait_text("SSH password:" if prompt == "password" else "Trust this key and save it? [yes/NO]")
                 if stopping == signal.SIGINT:
                     process.send("\x03")
@@ -346,7 +233,7 @@ def terminal_cancellation(fixture):
             assert authentication_count(fixture) == before
     args = fixture.args()
     args.remove("--password-stdin")
-    with TerminalProcess(fixture, args) as process:
+    with fixture.terminal(args) as process:
         process.wait_text("SSH password:")
         process.send("\x04")
         assert process.wait() != 0
@@ -360,19 +247,18 @@ def terminal_input_lifetime(fixture):
     pid_file = fixture.path / "terminal-child.pid"
     # Keep the controlling session alive after proxrs exits, as a real shell
     # does. Exiting a session leader would otherwise flush the PTY for us.
-    script = (shlex.join(args) + " & child=$!; printf '%s' \"$child\" > "
-              + shlex.quote(str(pid_file))
-              + "; wait \"$child\"; printf 'child-exited\\n' >&2; "
+    script = (shlex.join([sys.executable, str(ROOT / 'tests/docker/wait_proxy.py'), str(pid_file), *args])
+              + " & child=$!; wait \"$child\"; printf 'child-exited\\n' >&2; "
               + "IFS= read -r next; test \"$next\" = next-command")
     for completed in (False, True):
-        with TerminalProcess(fixture, ["/bin/sh", "-c", script]) as process:
+        with fixture.terminal(["/bin/sh", "-c", script]) as process:
             process.wait_text("SSH password:")
             child = int(pid_file.read_text())
             try:
                 process.send(fixture.password + ("\nnext-command\n" if completed else ""))
                 if completed:
                     process.ready()
-                    fixture.https()
+                    fixture.https(process)
                 else:
                     time.sleep(.1)
                 os.kill(child, signal.SIGTERM)
@@ -394,7 +280,7 @@ def prompt_deadline(fixture):
     args = fixture.args(store)
     args.remove("--password-stdin")
     before = authentication_count(fixture)
-    with TerminalProcess(fixture, args) as process:
+    with fixture.terminal(args) as process:
         process.wait_text("Trust this key and save it? [yes/NO]")
         time.sleep(11)
         assert process.poll() is None and authentication_count(fixture) == before
@@ -404,7 +290,7 @@ def prompt_deadline(fixture):
         assert process.poll() is None and authentication_count(fixture) == before
         process.send(fixture.password + "\n")
         process.ready()
-        fixture.https()
+        fixture.https(process)
         os.kill(process.pid, signal.SIGTERM)
         assert process.wait() == 0
         process.restored()

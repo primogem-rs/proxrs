@@ -2,18 +2,18 @@
 """An existing foreground process observes terminal restoration by proxrs."""
 import os
 import signal
-import subprocess
 import sys
 import termios
+from proxy_session import ProxySession
 
 signal.signal(signal.SIGINT, lambda signum, frame: None)
 
 with open('/dev/tty', 'rb+', buffering=0) as tty:
     group = os.tcgetpgrp(tty.fileno())
     settings = termios.tcgetattr(tty.fileno())
-    process = subprocess.Popen(sys.argv[1:])
-    print('PROXRS_PID ' + str(process.pid), file=sys.stderr, flush=True)
-    status = process.wait()
+    with ProxySession.inherited(sys.argv[1:]) as process:
+        print('PROXRS_PID ' + str(process.pid), file=sys.stderr, flush=True)
+        status = process.wait(180)
     assert os.tcgetpgrp(tty.fileno()) == group, 'foreground ownership was not restored'
     # Darwin sets PENDIN when switching back to canonical input. It is kernel
     # queue state, cleared by the next input operation, not a changed setting:

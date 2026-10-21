@@ -5,7 +5,6 @@ import concurrent.futures
 import contextlib
 import os
 from pathlib import Path
-import re
 import secrets
 import signal
 import socket
@@ -16,56 +15,17 @@ import subprocess
 import tempfile
 import time
 from fixture_record import record
+from proxy_session import ProxySession, cleanup_all, defer_termination, run_suite
 
 ROOT = Path(__file__).resolve().parents[2]
 
 def command(*args, **kwargs):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout
 
-def run_suite(main):
-    """Turn ordinary termination into unwinding of owned fixture contexts."""
-    def terminate(signum, _frame):
-        # A repeated interrupt must not cut short process/container cleanup.
-        for owned_signal in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(owned_signal, signal.SIG_IGN)
-        raise SystemExit(128 + signum)
-
-    previous = {number: signal.signal(number, terminate)
-                for number in (signal.SIGINT, signal.SIGTERM)}
-    try:
-        main()
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
-
-@contextlib.contextmanager
-def defer_termination():
-    """Finish ownership registration or cleanup before unwinding on a signal."""
-    pending = []
-    def defer(signum, _frame):
-        if not pending:
-            pending.append(signum)
-
-    previous = {number: signal.signal(number, defer)
-                for number in (signal.SIGINT, signal.SIGTERM)}
-    try:
-        yield
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
-        if pending:
-            number = pending[0]
-            handler = previous[number]
-            if callable(handler):
-                handler(number, None)
-            elif handler != signal.SIG_IGN:
-                raise SystemExit(128 + number)
-
 class Fixture:
     def __init__(self, image):
         self.image = image
         self.container = None
-        self.processes = []
         self.directory = tempfile.TemporaryDirectory(prefix="proxrs-cli-")
         self.path = Path(self.directory.name)
         self.password = "  " + secrets.token_urlsafe(32) + "  "
@@ -106,53 +66,32 @@ class Fixture:
                 "--ssh-port", str(self.port), "--port", "0", "--password-stdin", "--known-hosts",
                 str(known_hosts or self.path / "known_hosts")]
 
-    def start(self, args=None, password=None):
-        number = len(self.processes)
-        out = open(self.path / f"stdout-{number}", "w+")
-        err = open(self.path / f"stderr-{number}", "w+")
-        with defer_termination():
-            process = subprocess.Popen(args or self.args(), stdin=subprocess.PIPE, stdout=out, stderr=err, start_new_session=True)
-            self.processes.append((process, out, err))
-        process.stdin.write(((password if password is not None else self.password) + "\r\n").encode())
-        process.stdin.close()
-        return process, out, err
+    def start(self, args=None, password=None, *, env=None, input_suffix=b''):
+        return ProxySession.pipe(args or self.args(), env=env,
+                                 password_input=((password if password is not None else self.password) + "\r\n").encode() + input_suffix,
+                                 secrets=self.output_secrets())
 
+    def terminal(self, args=None, password_pipe=False):
+        return ProxySession.terminal(args or self.args(),
+                                     password_input=(self.password + "\n").encode() if password_pipe else None,
+                                     secrets=self.output_secrets())
+
+    def output_secrets(self):
+        return (self.password, 'proxrs-sensitive-header-marker', 'opaque tunnel bytes',
+                'end-to-end-value', 'must-not-forward', 'client-to-server', 'a' * 4096, 'b' * 4096)
+
+    @contextlib.contextmanager
     def ready(self, args=None):
-        process, out, err = self.start(args)
-        for _ in range(150):
-            out.seek(0)
-            exports = out.read()
-            match = re.search(r"export HTTP_PROXY='http://127.0.0.1:(\d+)'", exports)
-            if match and "export no_proxy=" in exports:
-                self.proxy_port = int(match[1])
-                assert exports.count("http://127.0.0.1:") == 4, exports
-                assert "export NO_PROXY='localhost,127.0.0.1,::1'" in exports
-                process_command = command("ps", "-p", str(process.pid), "-o", "command=").decode()
-                assert self.password not in process_command
-                return process
-            if process.poll() is not None:
-                err.seek(0)
-                raise AssertionError("proxy exited before readiness: " + err.read())
-            time.sleep(.1)
-        raise AssertionError("proxy did not become ready")
+        with self.start(args) as session:
+            session.ready()
+            assert session.stdout.count("http://127.0.0.1:") == 4, session.stdout
+            process_command = command("ps", "-p", str(session.pid), "-o", "command=").decode()
+            assert self.password not in process_command
+            yield session
 
-    def connect(self, authority="origin.proxrs.test:8443", status=200):
-        stream = socket.create_connection(("127.0.0.1", self.proxy_port), timeout=15)
-        stream.sendall(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Authorization: Basic proxrs-sensitive-header-marker\r\n\r\n".encode())
-        response = b""
-        while b"\r\n\r\n" not in response:
-            data = stream.recv(1)
-            if not data:
-                break
-            response += data
-        if not response.startswith(f"HTTP/1.1 {status} ".encode()):
-            stream.close()
-            raise AssertionError(response)
-        return stream
-
-    def https(self, authority="origin.proxrs.test:8443"):
+    def https(self, session, authority="origin.proxrs.test:8443"):
         context = ssl.create_default_context(cafile=str(self.path / "ca.pem"))
-        with self.connect(authority) as raw:
+        with session.connect(authority) as raw:
             with context.wrap_socket(raw, server_hostname="origin.proxrs.test") as stream:
                 stream.sendall(b"GET / HTTP/1.1\r\nHost: origin.proxrs.test\r\nConnection: close\r\n\r\n")
                 response = b""
@@ -162,50 +101,22 @@ class Fixture:
 
     @defer_termination()
     def __exit__(self, *args):
-        failures = []
-        try:
-            for process, out, err in self.processes:
-                try:
-                    if process.poll() is None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=8)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait(timeout=5)
-                    out.seek(0)
-                    err.seek(0)
-                    output = out.read() + err.read()
-                    if self.password in output:
-                        failures.append("password leaked")
-                    if "proxrs-sensitive-header-marker" in output or "opaque tunnel bytes" in output:
-                        failures.append("request headers or payload leaked")
-                except Exception as error:
-                    failures.append(str(error))
-                finally:
-                    out.close()
-                    err.close()
-        finally:
-            try:
-                if self.container:
-                    command("docker", "rm", "--force", self.container)
-                    record("removed", container_id=self.container)
-            finally:
-                self.directory.cleanup()
-        assert not failures, "; ".join(failures)
+        def remove_container():
+            if self.container:
+                command("docker", "rm", "--force", self.container, timeout=15)
+                record("removed", container_id=self.container)
+        cleanup_all([('container', remove_container), ('credentials', self.directory.cleanup)])
 
 def expect_startup_failure(fixture, expected, args=None, password=None, limit=14):
     started = time.monotonic()
-    process, out, err = fixture.start(args=args, password=password)
-    assert process.wait(timeout=limit) != 0
-    elapsed = time.monotonic() - started
-    out.seek(0)
-    err.seek(0)
-    assert not out.read(), "failed startup printed exports"
-    diagnostic = err.read()
-    assert expected in diagnostic, diagnostic
-    assert fixture.password not in diagnostic
-    return elapsed
+    with fixture.start(args=args, password=password) as process:
+        assert process.wait(timeout=limit) != 0
+        elapsed = time.monotonic() - started
+        assert not process.stdout, "failed startup printed exports"
+        diagnostic = process.stderr
+        assert expected in diagnostic, diagnostic
+        assert fixture.password not in diagnostic
+        return elapsed
 
 def authentication_cases(fixture):
     expect_startup_failure(fixture, "authentication rejected", password="incorrect-disposable-password")
@@ -260,10 +171,10 @@ def rsa_host_key_case(fixture):
         fixture.docker("sh", "-c", "cat > /etc/ssh/sshd_config", input=config.replace(b"ssh_host_ed25519_key", b"ssh_host_rsa_key"))
         fixture.docker("kill", "-HUP", "1")
         time.sleep(.3)
-        process = fixture.ready()
-        fixture.https()
-        process.terminate()
-        assert process.wait(timeout=5) == 0
+        with fixture.ready() as process:
+            fixture.https(process)
+            process.terminate()
+            assert process.wait(timeout=5) == 0
     finally:
         (fixture.path / "known_hosts").write_text(trust)
         fixture.docker("sh", "-c", "cat > /etc/ssh/sshd_config", input=config)
@@ -277,12 +188,12 @@ def forwarding_denied_case(fixture):
         fixture.docker("sh", "-c", "cat > /etc/ssh/sshd_config", input=config.replace(b"AllowTcpForwarding local", b"AllowTcpForwarding no"))
         fixture.docker("kill", "-HUP", "1")
         time.sleep(.3)
-        process = fixture.ready()
-        fixture.connect(status=502).close()
-        fixture.connect(status=502).close()
-        assert process.poll() is None
-        process.terminate()
-        assert process.wait(timeout=5) == 0
+        with fixture.ready() as process:
+            process.connect(status=502).close()
+            process.connect(status=502).close()
+            assert process.poll() is None
+            process.terminate()
+            assert process.wait(timeout=5) == 0
     finally:
         fixture.docker("sh", "-c", "cat > /etc/ssh/sshd_config", input=config)
         fixture.docker("kill", "-HUP", "1")
@@ -317,30 +228,30 @@ def ipv6_ssh_case(fixture):
             args = fixture.args(trust)
             args[args.index("--host") + 1] = "::1"
             args[args.index("--ssh-port") + 1] = str(port)
-            process = fixture.ready(args)
-            fixture.https()
-            process.terminate()
-            assert process.wait(timeout=5) == 0
+            with fixture.ready(args) as process:
+                fixture.https(process)
+                process.terminate()
+                assert process.wait(timeout=5) == 0
         finally:
             server.shutdown()
             thread.join(timeout=2)
     print("PASS: IPv6 SSH address through byte-for-byte loopback relay to the real fixture")
 
 def sigint_case(fixture):
-    process = fixture.ready()
-    with fixture.connect("127.0.0.1:9000") as stream:
-        process.send_signal(signal.SIGINT)
-        assert process.wait(timeout=5) == 0
-        assert stream.recv(1) == b""
-    print("PASS: SIGINT closes active CONNECT and exits cleanly")
+    with fixture.ready() as process:
+        with process.connect("127.0.0.1:9000") as stream:
+            process.send_signal(signal.SIGINT)
+            assert process.wait(timeout=5) == 0
+            assert stream.recv(1) == b""
+        print("PASS: SIGINT closes active CONNECT and exits cleanly")
 
 def ssh_loss_case(fixture):
-    process = fixture.ready()
-    stream = fixture.connect("127.0.0.1:9000")
-    try:
-        stream.sendall(b"before-outage")
-        assert stream.recv(100) == b"before-outage"
-        fixture.docker("python3", "-c", """import os, signal
+    with fixture.ready() as process:
+        stream = process.connect("127.0.0.1:9000")
+        try:
+            stream.sendall(b"before-outage")
+            assert stream.recv(100) == b"before-outage"
+            fixture.docker("python3", "-c", """import os, signal
 from pathlib import Path
 for path in Path('/proc').iterdir():
     if path.name.isdigit() and path.name != '1':
@@ -350,30 +261,29 @@ for path in Path('/proc').iterdir():
         except (FileNotFoundError, ProcessLookupError):
             pass
 """)
-        assert process.poll() is None
-        try:
-            assert stream.recv(100) == b"", "failed tunnel injected application bytes"
-        except ConnectionResetError:
-            pass
-        fixture.processes[-1][2].seek(0)
-        assert "SSH connection lost" in fixture.processes[-1][2].read()
-        with fixture.connect(status=503):
-            pass
-        deadline = time.monotonic() + 6
-        while True:
+            assert process.poll() is None
             try:
-                fixture.https()
-                break
-            except (AssertionError, OSError):
-                assert time.monotonic() < deadline, "SSH did not recover"
-                time.sleep(.05)
-        process.terminate()
-        assert process.wait(timeout=5) == 0
-        with socket.socket() as probe:
-            assert probe.connect_ex(("127.0.0.1", fixture.proxy_port)) != 0, "listener survived shutdown"
-    finally:
-        stream.close()
-    print("PASS: real SSH loss closes active tunnel, returns503, recovers, then cleans listener on shutdown")
+                assert stream.recv(100) == b"", "failed tunnel injected application bytes"
+            except ConnectionResetError:
+                pass
+            assert "SSH connection lost" in process.stderr
+            with process.connect(status=503):
+                pass
+            deadline = time.monotonic() + 6
+            while True:
+                try:
+                    fixture.https(process)
+                    break
+                except (AssertionError, OSError):
+                    assert time.monotonic() < deadline, "SSH did not recover"
+                    time.sleep(.05)
+            process.terminate()
+            assert process.wait(timeout=5) == 0
+            with socket.socket() as probe:
+                assert probe.connect_ex(("127.0.0.1", process.port)) != 0, "listener survived shutdown"
+        finally:
+            stream.close()
+        print("PASS: real SSH loss closes active tunnel, returns503, recovers, then cleans listener on shutdown")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -384,56 +294,56 @@ def main():
         rsa_host_key_case(fixture)
         forwarding_denied_case(fixture)
         ipv6_ssh_case(fixture)
-        process = fixture.ready()
-        listeners = command("lsof", "-nP", "-a", "-p", str(process.pid), "-iTCP", "-sTCP:LISTEN").decode()
-        assert f"TCP 127.0.0.1:{fixture.proxy_port} (LISTEN)" in listeners, listeners
-        assert f"*:{fixture.proxy_port}" not in listeners, listeners
-        fixture.https()
-        fixture.https("[::1]:8443")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            list(pool.map(lambda _: fixture.https(), range(16)))
-        with fixture.connect("127.0.0.1:9000") as stream:
-            stream.sendall(b"opaque tunnel bytes")
-            stream.shutdown(socket.SHUT_WR)
-            response = b""
-            while data := stream.recv(4096):
-                response += data
-            assert response == b"opaque tunnel bytesafter-half-close", response
-        for authority in ["missing-port", "host:0", "host:65536", "host:abc", "user@host:80", "[broken:ipv6]:80", "http://origin.proxrs.test:8443/"]:
-            fixture.connect(authority, status=400).close()
-        fixture.connect("origin.proxrs.test:65535", status=502).close()
-        fixture.connect("origin.proxrs.test:1", status=502).close()
-        fixture.https()
-        # Slow readers must not stall healthy channels or grow without bound.
-        stalled_readers = [fixture.connect("127.0.0.1:9002") for _ in range(4)]
-        try:
-            for reader in stalled_readers:
-                reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-                reader.sendall(b"x")
-            time.sleep(1)
+        with fixture.ready() as process:
+            listeners = command("lsof", "-nP", "-a", "-p", str(process.pid), "-iTCP", "-sTCP:LISTEN").decode()
+            assert f"TCP 127.0.0.1:{process.port} (LISTEN)" in listeners, listeners
+            assert f"*:{process.port}" not in listeners, listeners
+            fixture.https(process)
+            fixture.https(process, "[::1]:8443")
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(lambda _: fixture.https(), range(16)))
-        finally:
-            for reader in stalled_readers:
-                reader.close()
-        # A stalled open must not block other destinations, even after its504.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            started = time.monotonic()
-            pending = pool.submit(fixture.connect, "127.0.0.1:9001", 504)
-            time.sleep(.2)
-            fixture.https()
-            assert time.monotonic() - started < 3
-            pending.result(timeout=14).close()
-            assert 9 <= time.monotonic() - started <= 13
-        fixture.https()
-        process.terminate()
-        assert process.wait(timeout=5) == 0
-        with contextlib.suppress(ConnectionRefusedError):
-            with socket.create_connection(("127.0.0.1", fixture.proxy_port), timeout=1):
-                raise AssertionError("listener survived shutdown")
-        print(f"PASS {args.image}: HTTPS, remote DNS, IPv6, concurrency, half-close, CONNECT failures, exports, destination deadline and shutdown")
-        sigint_case(fixture)
-        ssh_loss_case(fixture)
+                list(pool.map(lambda _: fixture.https(process), range(16)))
+            with process.connect("127.0.0.1:9000") as stream:
+                stream.sendall(b"opaque tunnel bytes")
+                stream.shutdown(socket.SHUT_WR)
+                response = b""
+                while data := stream.recv(4096):
+                    response += data
+                assert response == b"opaque tunnel bytesafter-half-close", response
+            for authority in ["missing-port", "host:0", "host:65536", "host:abc", "user@host:80", "[broken:ipv6]:80", "http://origin.proxrs.test:8443/"]:
+                process.connect(authority, status=400).close()
+            process.connect("origin.proxrs.test:65535", status=502).close()
+            process.connect("origin.proxrs.test:1", status=502).close()
+            fixture.https(process)
+            # Slow readers must not stall healthy channels or grow without bound.
+            stalled_readers = [process.connect("127.0.0.1:9002") for _ in range(4)]
+            try:
+                for reader in stalled_readers:
+                    reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                    reader.sendall(b"x")
+                time.sleep(1)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(lambda _: fixture.https(process), range(16)))
+            finally:
+                for reader in stalled_readers:
+                    reader.close()
+            # A stalled open must not block other destinations, even after its504.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                started = time.monotonic()
+                pending = pool.submit(process.connect, "127.0.0.1:9001", 504)
+                time.sleep(.2)
+                fixture.https(process)
+                assert time.monotonic() - started < 3
+                pending.result(timeout=14).close()
+                assert 9 <= time.monotonic() - started <= 13
+            fixture.https(process)
+            process.terminate()
+            assert process.wait(timeout=5) == 0
+            with contextlib.suppress(ConnectionRefusedError):
+                with socket.create_connection(("127.0.0.1", process.port), timeout=1):
+                    raise AssertionError("listener survived shutdown")
+            print(f"PASS {args.image}: HTTPS, remote DNS, IPv6, concurrency, half-close, CONNECT failures, exports, destination deadline and shutdown")
+            sigint_case(fixture)
+            ssh_loss_case(fixture)
 
 if __name__ == "__main__":
     run_suite(main)

@@ -16,49 +16,46 @@ from proxy_cases import Fixture, ROOT
 def workload(fixture, total):
     args = fixture.args()
     args[0] = os.environ.get('PROXRS_TEST_RELEASE_BINARY', str(ROOT / 'target/release/proxrs'))
-    process = fixture.ready(args)
-    barrier = threading.Barrier(16)
-    def transfer(_):
-        with closing(connection(fixture)) as client:
-            barrier.wait(timeout=10)
-            client.request('GET', f'http://origin.proxrs.test:8080/bytes?count={total // 16}')
-            response = client.getresponse()
-            assert response.status == 200
-            # Every response is open before any reader drains its body.
-            barrier.wait(timeout=10)
-            received = 0
-            while data := response.read(16384):
-                assert data == b'x' * len(data)
-                received += len(data)
-                time.sleep(.001)
-            assert received == total // 16
-    started = time.monotonic()
-    progress = 0
-    with ThreadPoolExecutor(max_workers=16) as pool:
-        futures = [pool.submit(transfer, index) for index in range(16)]
-        while not all(future.done() for future in futures):
-            with closing(connection(fixture)) as client:
-                probe_started = time.monotonic()
-                client.request('GET', 'http://origin.proxrs.test:8080/')
-                assert client.getresponse().read() == b'proxrs-docker-origin\n'
-                assert time.monotonic() - probe_started < 3, 'healthy request stalled behind slow readers'
-                progress += 1
-            time.sleep(.05)
-        for future in futures:
-            future.result()
-    assert progress > 0
-    elapsed = time.monotonic() - started
-    process.terminate()
-    # On macOS wait4 reports this child's lifetime peak RSS in bytes. Do not use
-    # cumulative RUSAGE_CHILDREN or subtract maxima across runs.
-    pid, status, usage = os.wait4(process.pid, 0)
-    assert pid == process.pid
-    process.returncode = os.waitstatus_to_exitcode(status)
-    assert process.returncode == 0
-    result = dict(total_bytes=total, streams=16, read_bytes=16384, read_delay_seconds=.001,
-                  peak_rss_bytes=usage.ru_maxrss, elapsed_seconds=round(elapsed, 3), healthy_requests=progress)
-    print(json.dumps(result), flush=True)
-    return result
+    with fixture.ready(args) as process:
+        barrier = threading.Barrier(16)
+        def transfer(_):
+            with closing(connection(process)) as client:
+                barrier.wait(timeout=10)
+                client.request('GET', f'http://origin.proxrs.test:8080/bytes?count={total // 16}')
+                response = client.getresponse()
+                assert response.status == 200
+                # Every response is open before any reader drains its body.
+                barrier.wait(timeout=10)
+                received = 0
+                while data := response.read(16384):
+                    assert data == b'x' * len(data)
+                    received += len(data)
+                    time.sleep(.001)
+                assert received == total // 16
+        started = time.monotonic()
+        progress = 0
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = [pool.submit(transfer, index) for index in range(16)]
+            while not all(future.done() for future in futures):
+                with closing(connection(process)) as client:
+                    probe_started = time.monotonic()
+                    client.request('GET', 'http://origin.proxrs.test:8080/')
+                    assert client.getresponse().read() == b'proxrs-docker-origin\n'
+                    assert time.monotonic() - probe_started < 3, 'healthy request stalled behind slow readers'
+                    progress += 1
+                time.sleep(.05)
+            for future in futures:
+                future.result()
+        assert progress > 0
+        elapsed = time.monotonic() - started
+        process.terminate()
+        # The owner alone reaps this invocation and caches its lifetime RSS.
+        assert process.wait(5) == 0
+        usage = process.usage
+        result = dict(total_bytes=total, streams=16, read_bytes=16384, read_delay_seconds=.001,
+                      peak_rss_bytes=usage.ru_maxrss, elapsed_seconds=round(elapsed, 3), healthy_requests=progress)
+        print(json.dumps(result), flush=True)
+        return result
 
 
 def main():

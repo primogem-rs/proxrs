@@ -11,10 +11,8 @@ import subprocess
 import sys
 import time
 import contextlib
-from urllib.parse import urlsplit
 
 from proxy_cases import Fixture, ROOT
-from trust_cases import TerminalProcess
 
 PROXY_NAMES = ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy', 'ALL_PROXY', 'all_proxy')
 LOOPBACK = 'localhost,127.0.0.1,::1'
@@ -28,23 +26,25 @@ def run_args(fixture, child_args, inherit=False):
     return args + ['--', sys.executable, str(ROOT / 'tests/docker/managed_child.py'), *child_args]
 
 
+@contextlib.contextmanager
 def run_child(fixture, mode='report', extra=(), inherit=False, env=None, password=None):
-    return subprocess.run(run_args(fixture, [mode, str(fixture.path / 'ca.pem'), *extra], inherit),
-                          input=((password or fixture.password) + '\nleftover-secret-input\n').encode(),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                          start_new_session=True, timeout=20)
+    args = run_args(fixture, [mode, str(fixture.path / 'ca.pem'), *extra], inherit)
+    with fixture.start(args, password=password, env=env, input_suffix=b'leftover-secret-input\n') as session:
+        session.wait(20)
+        yield session
 
 
 def report(result, fixture):
-    assert fixture.password.encode() not in result.stdout + result.stderr, 'password leaked'
-    assert b'export HTTP_PROXY' not in result.stdout, result.stdout
-    assert result.returncode == 23, (result.returncode, result.stderr.decode())
+    assert fixture.password not in result.stdout + result.stderr, 'password leaked'
+    assert 'export HTTP_PROXY' not in result.stdout, result.stdout
+    assert result.returncode == 23, (result.returncode, result.stderr)
     data = json.loads(result.stdout)
     assert data['https'] == 'proxrs-docker-origin\n', data
     assert data['stdin'] == '', 'password stream reached the managed command'
     assert data['pid'] == data['pgid'], data
-    assert b'controlled-child-stderr' in result.stderr
-    port = urlsplit(data['env']['HTTP_PROXY']).port
+    assert 'controlled-child-stderr' in result.stderr
+    result.observe_proxy_url(data['env']['HTTP_PROXY'])
+    port = result.port
     with socket.socket() as probe:
         assert probe.connect_ex(('127.0.0.1', port)) != 0, 'listener survived child completion'
     return data
@@ -54,8 +54,8 @@ def basic_command(fixture):
     arguments = ['two words', '$(touch should-not-exist)', '; echo unsafe', '--flag', 'line\nbreak']
     env = os.environ.copy()
     env.update({name: '*' if 'no_proxy' in name.lower() else 'inherited.invalid:7' for name in PROXY_NAMES})
-    result = run_child(fixture, extra=arguments, env=env)
-    data = report(result, fixture)
+    with run_child(fixture, extra=arguments, env=env) as result:
+        data = report(result, fixture)
     assert data['args'] == arguments, data
     proxy = data['env']['HTTP_PROXY']
     assert proxy.startswith('http://127.0.0.1:') and not proxy.endswith(':0')
@@ -74,10 +74,11 @@ def exclusion_matrix(fixture):
     for overrides, expected in cases:
         env = {name: value for name, value in os.environ.items() if name not in PROXY_NAMES}
         env.update(overrides)
-        data = report(run_child(fixture, inherit=True, env=env), fixture)
+        with run_child(fixture, inherit=True, env=env) as result:
+            data = report(result, fixture)
         assert data['env']['NO_PROXY'] == data['env']['no_proxy'] == expected, data
-    rejected = subprocess.run([*fixture.args(), '--inherit-no-proxy'], input=b'', capture_output=True)
-    assert rejected.returncode == 2 and b'--inherit-no-proxy' in rejected.stderr
+    with fixture.start([*fixture.args(), '--inherit-no-proxy']) as rejected:
+        assert rejected.wait(5) == 2 and '--inherit-no-proxy' in rejected.stderr
     print('PASS: explicit exclusions, empty lowercase precedence, wildcard preservation, run-only option')
 
 
@@ -86,36 +87,28 @@ def terminal_input(fixture):
         args = run_args(fixture, ['interactive', str(fixture.path / 'ca.pem')])
         if not piped:
             args.remove('--password-stdin')
-        child_pid = None
         args = [sys.executable, str(ROOT / 'tests/docker/managed_terminal.py'), *args]
-        with TerminalProcess(fixture, args, password_pipe=piped) as process:
-            try:
-                if not piped:
-                    process.wait_text('SSH password:')
-                    process.send(fixture.password + '\n' + ('terminal-command-input\n' if queued else ''))
-                output = process.wait_text('CHILD_READY ')
-                child = json.loads(re.search(r'CHILD_READY (.+)', output)[1])
-                child_pid = child['pid']
-                assert child['tty'] and child['blocking'] and child['pid'] == child['pgid'] == child['foreground'], child
-                if not queued:
-                    process.send('\x03')
-                    process.wait_text('CHILD_HANDLED_INT_AND_HTTPS')
-                    process.send('terminal-command-input\n')
-                process.wait_text('CHECK_RESTORED_INPUT')
-                process.send('next-foreground-command\n')
-                assert process.wait() == 7, process.read(0)
-                assert 'TERMINAL_RESTORED_TO_EXISTING_PROCESS' in process.read(0)
-                process.restored()
-                process.out.seek(0)
-                data = json.loads(process.out.read())
-                assert data['entered'] == 'terminal-command-input\n', data
-                assert data['https'] == 'proxrs-docker-origin\n', data
-            finally:
-                if child_pid:
-                    try:
-                        os.killpg(child_pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+        with fixture.terminal(args, password_pipe=piped) as process:
+            if not piped:
+                process.wait_text('SSH password:')
+                process.send(fixture.password + '\n' + ('terminal-command-input\n' if queued else ''))
+            output = process.wait_text('CHILD_READY ')
+            match = re.search(r'CHILD_READY (.+)', output)
+            assert match, output
+            child = json.loads(match[1])
+            assert child['tty'] and child['blocking'] and child['pid'] == child['pgid'] == child['foreground'], child
+            if not queued:
+                process.send('\x03')
+                process.wait_text('CHILD_HANDLED_INT_AND_HTTPS')
+                process.send('terminal-command-input\n')
+            process.wait_text('CHECK_RESTORED_INPUT')
+            process.send('next-foreground-command\n')
+            assert process.wait() == 7, process.read(0)
+            assert 'TERMINAL_RESTORED_TO_EXISTING_PROCESS' in process.read(0)
+            process.restored()
+            data = json.loads(process.stdout)
+            assert data['entered'] == 'terminal-command-input\n', data
+            assert data['https'] == 'proxrs-docker-origin\n', data
     print('PASS: foreground terminal input after hidden and piped password, settings restored')
 
 
@@ -135,18 +128,11 @@ def descendant_cleanup(fixture):
             for finish in ('exit', 'terminate', 'interrupt', 'ssh_loss'):
                 relay_context = SSHRelay(fixture) if finish == 'ssh_loss' else contextlib.nullcontext()
                 with relay_context as relay:
-                    out = open(fixture.path / 'managed-out', 'w+')
-                    err = open(fixture.path / 'managed-err', 'w+')
-                    process = subprocess.Popen(run_args(fixture, ['descendants', str(fixture.path / 'ca.pem'), 'stubborn' if stubborn else 'cooperative', finish]),
-                                               stdin=subprocess.PIPE, stdout=out, stderr=err, start_new_session=True)
-                    child = None
-                    try:
-                        process.stdin.write((fixture.password + '\n').encode())
-                        process.stdin.close()
+                    with fixture.start(run_args(fixture, ['descendants', str(fixture.path / 'ca.pem'), 'stubborn' if stubborn else 'cooperative', finish])) as process:
+                        child = None
                         deadline = time.monotonic() + 15
                         while time.monotonic() < deadline:
-                            out.seek(0)
-                            line = out.readline()
+                            line = process.stdout.splitlines()[0] if process.stdout else None
                             if line:
                                 child = json.loads(line)
                                 break
@@ -160,11 +146,13 @@ def descendant_cleanup(fixture):
                         elif finish == 'interrupt':
                             process.send_signal(signal.SIGINT)
                         elif finish == 'ssh_loss':
+                            assert relay is not None
                             relay.change('reject')
                             time.sleep(.2)
                             assert alive(child['pid']) and alive(child['descendant']), 'retry killed the managed command early'
                             assert process.poll() is None
-                        port = urlsplit(child['proxy']).port
+                        process.observe_proxy_url(child['proxy'])
+                        port = process.port
                         def listener_closed():
                             with socket.socket() as probe:
                                 return probe.connect_ex(('127.0.0.1', port)) != 0
@@ -172,9 +160,7 @@ def descendant_cleanup(fixture):
                             wait_for(listener_closed, 10 if relay else 1, 'listener closure before shutdown grace')
                             assert alive(child['descendant']), 'stubborn descendant did not receive a grace period'
                         status = process.wait(timeout=15 if relay else 8)
-                        out.seek(0)
-                        err.seek(0)
-                        assert fixture.password not in out.read() + err.read(), 'password leaked'
+                        assert fixture.password not in process.stdout + process.stderr, 'password leaked'
                         elapsed = time.monotonic() - start
                         assert status == (17 if finish == 'exit' else 1 if finish == 'ssh_loss' else 0), status
                         assert not alive(child['pid']) and not alive(child['descendant']), 'owned process survived shutdown'
@@ -189,15 +175,7 @@ def descendant_cleanup(fixture):
                             assert len(relay.attempts) == 4, relay.attempts
                         assert sentinel.poll() is None, 'unrelated process was signaled'
                         assert listener_closed()
-                    finally:
-                        if process.poll() is None:
-                            process.kill()
-                            process.wait()
-                        if child:
-                            with contextlib.suppress(ProcessLookupError):
-                                os.killpg(child['pid'], signal.SIGKILL)
-                        out.close()
-                        err.close()
+
     finally:
         sentinel.terminate()
         sentinel.wait()
@@ -205,16 +183,16 @@ def descendant_cleanup(fixture):
 
 
 def startup_and_launch_failures(fixture):
-    failed = run_child(fixture, password='wrong-disposable-password')
-    assert failed.returncode == 1 and not failed.stdout
-    assert b'authentication rejected' in failed.stderr
+    with run_child(fixture, password='wrong-disposable-password') as failed:
+        assert failed.returncode == 1 and not failed.stdout
+        assert 'authentication rejected' in failed.stderr
     with socket.socket() as occupied:
         occupied.bind(('127.0.0.1', 0))
         occupied.listen()
         args = run_args(fixture, ['report', str(fixture.path / 'ca.pem')])
         args[args.index('--port') + 1] = str(occupied.getsockname()[1])
-        failed = subprocess.run(args, input=b'', capture_output=True, start_new_session=True, timeout=3)
-        assert failed.returncode == 1 and not failed.stdout and b'could not bind' in failed.stderr
+        with fixture.start(args) as failed:
+            assert failed.wait(3) == 1 and not failed.stdout and 'could not bind' in failed.stderr
     for kind in ('launch_failure', 'terminate', 'startup_interrupt'):
         args = run_args(fixture, ['interactive', str(fixture.path / 'ca.pem')])
         if kind == 'launch_failure':
@@ -222,29 +200,24 @@ def startup_and_launch_failures(fixture):
         if kind == 'startup_interrupt':
             args.remove('--password-stdin')
         wrapped = [sys.executable, str(ROOT / 'tests/docker/managed_terminal.py'), *args]
-        child_pid = None
-        with TerminalProcess(fixture, wrapped, password_pipe=kind != 'startup_interrupt') as process:
-            try:
-                output = process.wait_text('PROXRS_PID ')
-                proxy_pid = int(re.search(r'PROXRS_PID (\d+)', output)[1])
-                if kind == 'startup_interrupt':
-                    process.wait_text('SSH password:')
-                    process.send('\x03')
-                elif kind == 'terminate':
-                    output = process.wait_text('CHILD_READY ')
-                    child_pid = json.loads(re.search(r'CHILD_READY (.+)', output)[1])['pid']
-                    os.kill(proxy_pid, signal.SIGTERM)
-                else:
-                    process.wait_text('could not launch managed command')
-                process.wait_text('CHECK_RESTORED_INPUT')
-                process.send('next-foreground-command\n')
-                assert process.wait() == (1 if kind == 'launch_failure' else 0), process.read(0)
-                assert 'TERMINAL_RESTORED_TO_EXISTING_PROCESS' in process.read(0)
-                process.restored()
-            finally:
-                if child_pid:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(child_pid, signal.SIGKILL)
+        with fixture.terminal(wrapped, password_pipe=kind != 'startup_interrupt') as process:
+            output = process.wait_text('PROXRS_PID ')
+            match = re.search(r'PROXRS_PID (\d+)', output)
+            assert match, output
+            proxy_pid = int(match[1])
+            if kind == 'startup_interrupt':
+                process.wait_text('SSH password:')
+                process.send('\x03')
+            elif kind == 'terminate':
+                output = process.wait_text('CHILD_READY ')
+                os.kill(proxy_pid, signal.SIGTERM)
+            else:
+                process.wait_text('could not launch managed command')
+            process.wait_text('CHECK_RESTORED_INPUT')
+            process.send('next-foreground-command\n')
+            assert process.wait() == (1 if kind == 'launch_failure' else 0), process.read(0)
+            assert 'TERMINAL_RESTORED_TO_EXISTING_PROCESS' in process.read(0)
+            process.restored()
     print('PASS: readiness gates child launch; launch failure, startup Ctrl-C and directed termination restore existing foreground process')
 
 

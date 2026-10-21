@@ -23,11 +23,11 @@ def hold_fixture(image, startup=False):
     if startup:
         print(json.dumps(dict(directory=str(fixture.path))), flush=True)
     with fixture:
-        process = fixture.ready()
-        fixture.https()
-        print(json.dumps(dict(container=fixture.container, directory=str(fixture.path),
-                              proxy_pid=process.pid, proxy_port=fixture.proxy_port)), flush=True)
-        signal.pause()
+        with fixture.ready() as process:
+            fixture.https(process)
+            print(json.dumps(dict(container=fixture.container, directory=str(fixture.path),
+                                  proxy_pid=process.pid, proxy_port=process.port)), flush=True)
+            signal.pause()
 
 
 def exists(pid):
@@ -73,6 +73,7 @@ os.execv({docker!r}, [{docker!r}] + args)
                              start_new_session=True, env=environment)
     sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],
                                 start_new_session=True)
+    assert owner.stdout is not None and owner.stderr is not None
     resources = None
     try:
         assert select.select([owner.stdout], [], [], 90)[0], 'fixture owner did not become ready'
