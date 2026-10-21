@@ -49,27 +49,28 @@ Normal command completion closes the proxy, cleans remaining members of the comm
 ## Development
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-bash scripts/docker-ssh-smoke.sh
-cargo build
-python3 tests/docker/proxy_cases.py --image ubuntu:24.04
-python3 tests/docker/proxy_cases.py --image debian:12
-python3 tests/docker/trust_cases.py --image ubuntu:24.04
-python3 tests/docker/trust_cases.py --image debian:12
-python3 tests/docker/run_cases.py --image ubuntu:24.04
-python3 tests/docker/run_cases.py --image debian:12
-python3 tests/docker/http_cases.py --image ubuntu:24.04
-python3 tests/docker/http_cases.py --image debian:12
-python3 tests/docker/cleanup_cases.py --image ubuntu:24.04
-python3 tests/docker/cleanup_cases.py --image debian:12
-python3 tests/docker/recovery_cases.py --image ubuntu:24.04
-python3 tests/docker/recovery_cases.py --image debian:12
-cargo build --release
-python3 tests/docker/load_cases.py --image ubuntu:24.04
-python3 tests/docker/load_cases.py --image debian:12
+bash scripts/check.sh
+python3 scripts/acceptance.py
 ```
+
+The baseline command runs formatting, strict Clippy, default Rust tests, and the
+runner's public CLI regression tests. The same command runs in the **macOS
+baseline** GitHub Actions job on pushes and pull requests. Clippy rejects print
+macros (including aliases), `dbg!`, and direct stdout/stderr handles outside
+`src/terminal.rs`. The baseline needs Rust and Python 3.9+; it does not need Docker.
+
+The acceptance runner requires macOS and a local Docker engine. It builds debug
+and release executables first, captures those binaries, then runs the OpenSSH
+fixture smoke and all seven proxrs suites against Ubuntu 24.04 and Debian 12.
+Each run writes a private directory under `target/acceptance/` with a
+`manifest.json`, source fingerprints, binary SHA-256 hashes, exact fixture image
+IDs, logs, exit statuses, timings, and release RSS measurements. Failures and
+ordinary SIGINT/SIGTERM retain their reports; remaining steps are marked
+`not_run`. A source or captured-binary change invalidates the run.
+
+For a focused run, use `python3 scripts/acceptance.py --suites http cleanup
+--images ubuntu:24.04` on one line. See the [runner details](tests/docker/README.md#acceptance-runner)
+for report semantics and prerequisites.
 
 The SSH transport uses maintained russh with an explicit, pinned [receive-window and authentication-result patch](vendor/russh/PROXRS_PATCH.md) to keep stalled channels from blocking healthy ones. Hyper handles HTTP and CONNECT; a bounded httparse ingress pass rejects ambiguous framing before Hyper normalizes headers. See the [HTTP acceptance report](tests/docker/HTTP_ACCEPTANCE.md) for protocol cases and bounds, and the [assembled acceptance report](tests/docker/ACCEPTANCE.md) for recovery, lifecycle, and final release RSS measurements.
 

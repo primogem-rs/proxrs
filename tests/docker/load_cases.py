@@ -15,7 +15,7 @@ from proxy_cases import Fixture, ROOT
 
 def workload(fixture, total):
     args = fixture.args()
-    args[0] = str(ROOT / 'target/release/proxrs')
+    args[0] = os.environ.get('PROXRS_TEST_RELEASE_BINARY', str(ROOT / 'target/release/proxrs'))
     process = fixture.ready(args)
     barrier = threading.Barrier(16)
     def transfer(_):

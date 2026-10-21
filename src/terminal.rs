@@ -1,3 +1,6 @@
+// This module owns user-facing terminal output.
+#![allow(clippy::disallowed_macros, clippy::disallowed_methods)]
+
 use anyhow::{Context, Result, bail};
 use std::{
     fs::{File, OpenOptions},

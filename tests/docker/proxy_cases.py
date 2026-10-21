@@ -15,6 +15,7 @@ import ssl
 import subprocess
 import tempfile
 import time
+from fixture_record import record
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -76,9 +77,11 @@ class Fixture:
             command("docker", "build", "--iidfile", str(image_id), "--build-arg", "BASE_IMAGE=" + self.image,
                     "--tag", tag, str(ROOT / "tests/docker"))
             built_image = image_id.read_text().strip()
+            record("built", base_image=self.image, image_id=built_image)
             with defer_termination():
                 self.container = command("docker", "run", "--detach", "--rm", "--label", "dev.proxrs.fixture=cli",
                                          "--publish", "127.0.0.1::22", "--add-host", "origin.proxrs.test:127.0.0.1", built_image).decode().strip()
+                record("created", container_id=self.container, image_id=built_image)
             self.port = int(command("docker", "port", self.container, "22/tcp").decode().strip().rsplit(":", 1)[1])
             self.docker("chpasswd", input=("proxrs:" + self.password + "\n").encode())
             for _ in range(100):
@@ -99,7 +102,7 @@ class Fixture:
         return command("docker", "exec", "-i", self.container, *args, **kwargs)
 
     def args(self, known_hosts=None):
-        return [str(ROOT / "target/debug/proxrs"), "up", "--host", "127.0.0.1", "--user", "proxrs",
+        return [os.environ.get("PROXRS_TEST_BINARY", str(ROOT / "target/debug/proxrs")), "up", "--host", "127.0.0.1", "--user", "proxrs",
                 "--ssh-port", str(self.port), "--port", "0", "--password-stdin", "--known-hosts",
                 str(known_hosts or self.path / "known_hosts")]
 
@@ -186,6 +189,7 @@ class Fixture:
             try:
                 if self.container:
                     command("docker", "rm", "--force", self.container)
+                    record("removed", container_id=self.container)
             finally:
                 self.directory.cleanup()
         assert not failures, "; ".join(failures)

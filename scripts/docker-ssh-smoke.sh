@@ -14,6 +14,13 @@ docker_cmd=(docker)
 "${docker_cmd[@]}" info >/dev/null
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/proxrs-ssh.XXXXXX")"
 container_id=""
+base_image="${1:-ubuntu:24.04}"
+
+record_fixture() {
+    if [[ -n "${PROXRS_TEST_FIXTURES:-}" ]]; then
+        python3 "$repo_root/tests/docker/fixture_record.py" "$@"
+    fi
+}
 
 cleanup() {
     local result=$?
@@ -25,6 +32,8 @@ cleanup() {
         if ! "${docker_cmd[@]}" rm -f "$container_id" >/dev/null; then
             echo "Could not remove test container: $container_id" >&2
             result=1
+        else
+            record_fixture removed "container_id=$container_id" || result=1
         fi
     fi
     rm -rf "$test_dir"
@@ -34,10 +43,13 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-"${docker_cmd[@]}" build --tag proxrs-ssh-test:ubuntu24.04 "$repo_root/tests/docker"
+"${docker_cmd[@]}" build --iidfile "$test_dir/image-id" --build-arg "BASE_IMAGE=$base_image" "$repo_root/tests/docker"
+built_image="$(cat "$test_dir/image-id")"
+record_fixture built "base_image=$base_image" "image_id=$built_image"
 container_id="$("${docker_cmd[@]}" run --detach --rm \
     --label dev.proxrs.fixture=ssh \
-    --publish 127.0.0.1::22 proxrs-ssh-test:ubuntu24.04)"
+    --publish 127.0.0.1::22 "$built_image")"
+record_fixture created "container_id=$container_id" "image_id=$built_image"
 ssh_port="$("${docker_cmd[@]}" port "$container_id" 22/tcp)"
 ssh_port="${ssh_port##*:}"
 
