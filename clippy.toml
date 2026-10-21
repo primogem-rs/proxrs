@@ -1,0 +1,12 @@
+disallowed-macros = [
+    { path = "std::print", reason = "Route terminal output through src/terminal.rs" },
+    { path = "std::println", reason = "Route terminal output through src/terminal.rs" },
+    { path = "std::eprint", reason = "Route terminal output through src/terminal.rs" },
+    { path = "std::eprintln", reason = "Route terminal output through src/terminal.rs" },
+    { path = "std::dbg", reason = "Route terminal output through src/terminal.rs" },
+]
+
+disallowed-methods = [
+    { path = "std::io::stdout", reason = "Route terminal output through src/terminal.rs" },
+    { path = "std::io::stderr", reason = "Route terminal output through src/terminal.rs" },
+]

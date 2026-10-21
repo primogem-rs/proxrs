@@ -1,12 +1,77 @@
 # Docker SSH fixture
 
+## Acceptance runner
+
+The repeatable entry point for acceptance is:
+
+```sh
+python3 scripts/acceptance.py
+# Focused checks still build first:
+python3 scripts/acceptance.py --suites http cleanup --images ubuntu:24.04
+# Save to a new directory outside the repository (existing directories are refused):
+python3 scripts/acceptance.py --output /tmp/proxrs-acceptance-run
+```
+
+Requires macOS, Rust/Cargo, Python 3.9+, Docker CLI with a running local engine,
+OpenSSH, OpenSSL, and standard macOS utilities including `lsof`. Run the separate
+Docker-independent baseline with `bash scripts/check.sh` before acceptance.
+
+By default, the runner builds debug and release with `--locked`, then runs
+`smoke`, `proxy`, `trust`, `http`, `run`, `recovery`, `cleanup`, and `load` in order
+on both `ubuntu:24.04` and `debian:12`. `--suites` and `--images` select a subset;
+only selected checks count as tested. Debug is built for proxrs suites, and
+release is also built when `load` is selected. A smoke-only run tests the fixture
+and does not build or test proxrs. The first failed step stops the run.
+
+Each new report directory (default `target/acceptance/<UTC time>-<unique ID>/`)
+contains:
+
+- `manifest.json`: schema version, selection, host/tool versions, Git revision,
+  branch and dirty status, and SHA-256 inventory of tracked and nonignored
+  untracked files, including fixture sources and the lockfile. Dirty source
+  contents are not copied. The inventory and revision are checked after each
+  step and on exit; source changes mark the report `invalid`.
+- `bin/<profile>/proxrs`: private executable snapshots copied from Cargo's
+  reported artifact paths, with size, profile, and SHA-256 in the manifest.
+  Custom Cargo target directories work. All suites use these snapshots; their
+  hashes are verified again throughout the run.
+- `logs/<step>.log`: combined stdout/stderr, with command, start/end time,
+  duration, exit code, status, and log hash in the manifest. Build logs contain
+  Cargo JSON artifacts and rendered compiler diagnostics.
+- `fixtures/<step>.jsonl`: append-only build/create/remove events with requested
+  base-image tag, immutable built image ID, and owned container ID. Containers
+  launch by image ID. Events and outstanding container IDs are also in the
+  manifest; a passing suite must have complete creation/removal evidence.
+- `results/load-<image>.json`: release RSS workloads and measurements, also
+  included in the manifest.
+
+The manifest is replaced atomically as each step progresses. Its overall status
+is `running`, `passed`, `failed`, `interrupted`, or `invalid`. Steps that did not
+start remain `not_run`; a fixture-only `smoke` pass never counts as a proxrs pass.
+SIGINT/SIGTERM is forwarded to the active suite, which unwinds its own resources;
+the runner waits for cleanup before recording interruption and returns 128 plus
+the signal number. Repeated signals do not interrupt cleanup. SIGKILL, power
+loss, or a hung external tool can leave a `running` report and require inspection.
+Do not edit source or run another build against the same Cargo target directory
+during acceptance. Reports identify the observed build and fixtures; they are
+not a reproducible-build or image archive.
+
+Standalone suite commands below remain useful for diagnosis, but require manual
+builds and do not produce the combined provenance report. The runner sets
+`PROXRS_TEST_BINARY`, `PROXRS_TEST_RELEASE_BINARY`, and `PROXRS_TEST_FIXTURES` for
+its children; standalone suites default to `target/debug/proxrs` and
+`target/release/proxrs`. Logs and fixture events never include generated
+passwords or private keys. Temporary credentials are removed by the suites.
+
+## OpenSSH fixture smoke
+
 Run from macOS with a local Docker engine available through the Docker CLI:
 
 ```sh
 bash scripts/docker-ssh-smoke.sh
 ```
 
-Requires Docker CLI, OpenSSH client, OpenSSL, and standard macOS shell utilities. The script uses the active Docker configuration, including context and environment overrides, without selecting a runtime provider. The engine must publish container ports to this Mac's loopback interface; a remote Docker engine is not supported by this local fixture. The first run downloads Ubuntu 24.04 and installs OpenSSH/Python packages in the image; later runs reuse Docker's build cache. It leaves the tagged test image cached for reuse.
+Requires Docker CLI, OpenSSH client, OpenSSL, and standard macOS shell utilities. The script uses the active Docker configuration, including context and environment overrides, without selecting a runtime provider. The engine must publish container ports to this Mac's loopback interface; a remote Docker engine is not supported by this local fixture. The first run downloads Ubuntu 24.04 and installs OpenSSH/Python packages in the image; later runs reuse Docker's build cache. Pass `debian:12` as the script's first argument to select Debian. Built images remain cached for reuse.
 
 The script starts a fresh container with only its SSH port published to a random macOS loopback port. It generates a disposable password for the non-root `proxrs` user and fresh server host keys. It obtains the host public key through Docker and verifies it using a temporary known-hosts file. The host's SSH configuration and known-hosts files are not changed.
 
